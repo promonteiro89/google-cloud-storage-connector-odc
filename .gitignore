@@ -11,3 +11,6 @@ clean_zip/
 __MACOSX/
 ._*
 .*
+
+# Build output (zip is created from here, not committed)
+publish/
