@@ -117,16 +117,24 @@ public class GoogleCloudStorage : IGoogleCloudStorage
         storageClient.DeleteObject(bucketName, objectName);
     }
 
-    public void Object_GetSignedUrl(Authentication authentication, string bucketName, string objectName, int expirationMinutes, out string url)
+    public void Object_GetSignedUrl(Authentication authentication, string bucketName, string objectName, int expirationMinutes, out string url, string operation = "Download")
     {
         var credential = GetServiceAccountCredential(authentication);
         var urlSigner = UrlSigner.FromCredential(credential);
+
+        var method = (operation ?? "").Trim().ToUpperInvariant() switch
+        {
+            "DOWNLOAD" => HttpMethod.Get,
+            "UPLOAD" => HttpMethod.Put,
+            "DELETE" => HttpMethod.Delete,
+            _ => throw new ArgumentException($"Invalid Operation '{operation}'. Use 'Download', 'Upload', or 'Delete'.")
+        };
 
         url = urlSigner.Sign(
             bucketName,
             objectName,
             TimeSpan.FromMinutes(expirationMinutes),
-            HttpMethod.Get
+            method
         );
     }
 

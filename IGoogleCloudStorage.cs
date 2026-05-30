@@ -48,13 +48,14 @@ public interface IGoogleCloudStorage
         [OSParameter(Description = "Bucket Name")] string bucketName,
         [OSParameter(Description = "Object Name")] string objectName);
 
-    [OSAction(Description = "Generates a signed URL for an object.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    [OSAction(Description = "Generates a temporary signed URL for an object. The Operation controls whether the URL allows download (GET), upload (PUT), or delete (DELETE).", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_GetSignedUrl(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "Bucket Name")] string bucketName,
         [OSParameter(Description = "Object Name")] string objectName,
         [OSParameter(Description = "Expiration time in minutes")] int expirationMinutes,
-        [OSParameter(Description = "The temporary secure URL")] out string url);
+        [OSParameter(Description = "The temporary secure URL")] out string url,
+        [OSParameter(Description = "The operation the URL will permit: 'Download' (GET), 'Upload' (PUT), or 'Delete' (DELETE). Defaults to 'Download'.")] string operation = "Download");
 
     [OSAction(Description = "Lists all buckets in the specified project.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Bucket_List(

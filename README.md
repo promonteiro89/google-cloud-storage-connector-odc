@@ -169,7 +169,7 @@ Permanently removes an object from a bucket.
 | `objectName` | `Text` | Full path/filename to delete |
 
 #### `Object_GetSignedUrl`
-Generates a time-limited V4 GET URL for secure, direct-to-browser file access.
+Generates a time-limited V4 signed URL for secure, direct-to-browser file access. The `operation` controls the action the URL permits: download, upload, or delete.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -178,11 +178,14 @@ Generates a time-limited V4 GET URL for secure, direct-to-browser file access.
 | `bucketName` | `Text` | Source bucket |
 | `objectName` | `Text` | Full path/filename |
 | `expirationMinutes` | `Integer` | Link validity duration |
+| `operation` | `Text` | Optional. `Download` (GET), `Upload` (PUT), or `Delete` (DELETE). Case-insensitive. Defaults to `Download`. |
 
 **Outputs:**
 | Output | Type | Description |
 |--------|------|-------------|
-| `url` | `Text` | Temporary secure URL |
+| `url` | `Text` | Temporary secure URL. For `Upload`, the client sends an HTTP PUT with the file as the body. |
+
+> **Multi-upload:** signed URLs are bound to a specific object path, so request one `Upload` URL per file (pass each file's `objectName`).
 
 ---
 
