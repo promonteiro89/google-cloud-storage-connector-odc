@@ -34,6 +34,14 @@ public interface IGoogleCloudStorage
         [OSParameter(Description = "Object Name")] string objectName,
         [OSParameter(Description = "True if the object exists")] out bool exists);
 
+    [OSAction(Description = "Retrieves an object's metadata (size, content type, hashes, generation, storage class, timestamps) without downloading its content.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    void Object_GetMetadata(
+        [OSParameter(Description = "Authentication credentials")] Authentication authentication,
+        [OSParameter(Description = "Bucket Name")] string bucketName,
+        [OSParameter(Description = "Object Name")] string objectName,
+        [OSParameter(Description = "True if the object was found, False otherwise")] out bool exists,
+        [OSParameter(Description = "The object's metadata (only populated when Exists is True)")] out OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.ObjectMetadata metadata);
+
     [OSAction(Description = "Deletes an object from a bucket.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_Delete(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,

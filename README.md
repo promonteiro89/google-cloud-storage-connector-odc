@@ -142,6 +142,22 @@ Checks whether an object exists in a bucket via a lightweight metadata probe.
 |--------|------|-------------|
 | `exists` | `Boolean` | True if the object exists |
 
+#### `Object_GetMetadata`
+Retrieves an object's full metadata (size, content type, hashes, generation, storage class, timestamps) without downloading its content. Returns `Exists = False` if the object is not found, leaving the `metadata` output empty.
+
+**Arguments:**
+| Argument | Type | Description |
+|----------|------|-------------|
+| `authentication` | `Authentication` | GCP credentials |
+| `bucketName` | `Text` | Source bucket |
+| `objectName` | `Text` | Full path/filename to inspect |
+
+**Outputs:**
+| Output | Type | Description |
+|--------|------|-------------|
+| `exists` | `Boolean` | True if the object was found |
+| `metadata` | `ObjectMetadata` | Full object metadata (only populated when `exists` is True) |
+
 #### `Object_Delete`
 Permanently removes an object from a bucket.
 
@@ -233,6 +249,25 @@ Represents storage container metadata.
 - `StorageClass`: Text
 - `Created`: Date Time (UTC)
 
+### `ObjectMetadata`
+Represents the complete metadata of an object (returned by `Object_GetMetadata`).
+- `Name`: Text (Full path)
+- `Bucket`: Text
+- `Size`: Long Integer
+- `ContentType`: Text
+- `ContentEncoding`: Text
+- `ContentDisposition`: Text
+- `CacheControl`: Text
+- `MD5Hash`: Text
+- `Crc32c`: Text
+- `ETag`: Text
+- `Generation`: Long Integer
+- `Metageneration`: Long Integer
+- `StorageClass`: Text
+- `MediaLink`: Text
+- `TimeCreated`: Date Time (UTC)
+- `Updated`: Date Time (UTC)
+
 ---
 
 ## Project Structure
@@ -249,7 +284,8 @@ GoogleCloudStorage_ODC/
     ├── Authentication.cs       # Credential model
     ├── File.cs                 # Binary wrapper
     ├── Bucket.cs               # Container metadata
-    └── Object.cs               # File metadata
+    ├── Object.cs               # File metadata (list entry)
+    └── ObjectMetadata.cs       # Full object metadata
 ```
 
 ---

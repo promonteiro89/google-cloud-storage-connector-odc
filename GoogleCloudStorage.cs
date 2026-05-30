@@ -74,6 +74,43 @@ public class GoogleCloudStorage : IGoogleCloudStorage
         }
     }
 
+    public void Object_GetMetadata(Authentication authentication, string bucketName, string objectName, out bool exists, out ObjectMetadata metadata)
+    {
+        var storageClient = GetStorageClient(authentication);
+        exists = false;
+        metadata = new ObjectMetadata();
+
+        try
+        {
+            var obj = storageClient.GetObject(bucketName, objectName);
+            exists = true;
+
+            metadata = new ObjectMetadata
+            {
+                Name = obj.Name ?? string.Empty,
+                Bucket = obj.Bucket ?? string.Empty,
+                Size = (long)(obj.Size ?? 0),
+                ContentType = obj.ContentType ?? string.Empty,
+                ContentEncoding = obj.ContentEncoding ?? string.Empty,
+                ContentDisposition = obj.ContentDisposition ?? string.Empty,
+                CacheControl = obj.CacheControl ?? string.Empty,
+                MD5Hash = obj.Md5Hash ?? string.Empty,
+                Crc32c = obj.Crc32c ?? string.Empty,
+                ETag = obj.ETag ?? string.Empty,
+                Generation = obj.Generation ?? 0,
+                Metageneration = obj.Metageneration ?? 0,
+                StorageClass = obj.StorageClass ?? string.Empty,
+                MediaLink = obj.MediaLink ?? string.Empty,
+                TimeCreated = obj.TimeCreatedDateTimeOffset?.UtcDateTime ?? new DateTime(1900, 1, 1),
+                Updated = obj.UpdatedDateTimeOffset?.UtcDateTime ?? new DateTime(1900, 1, 1)
+            };
+        }
+        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
+        {
+            exists = false;
+        }
+    }
+
     public void Object_Delete(Authentication authentication, string bucketName, string objectName)
     {
         var storageClient = GetStorageClient(authentication);
