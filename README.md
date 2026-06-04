@@ -168,6 +168,32 @@ Permanently removes an object from a bucket.
 | `bucketName` | `Text` | Source bucket |
 | `objectName` | `Text` | Full path/filename to delete |
 
+#### `Object_Copy`
+Copies an object to another location, within the same bucket or across buckets, without downloading its content. Overwrites the destination if it exists.
+
+**Arguments:**
+| Argument | Type | Description |
+|----------|------|-------------|
+| `authentication` | `Authentication` | GCP credentials |
+| `sourceBucketName` | `Text` | Bucket that currently contains the object |
+| `sourceObjectName` | `Text` | Full path/filename of the source object |
+| `destinationBucketName` | `Text` | Bucket to copy into (can equal the source) |
+| `destinationObjectName` | `Text` | Full path/filename for the destination |
+
+#### `Object_Move`
+Moves an object to another location (copy + delete of the source), within the same bucket or across buckets. Use the same source and destination bucket to rename. Overwrites the destination if it exists.
+
+**Arguments:**
+| Argument | Type | Description |
+|----------|------|-------------|
+| `authentication` | `Authentication` | GCP credentials |
+| `sourceBucketName` | `Text` | Bucket that currently contains the object |
+| `sourceObjectName` | `Text` | Full path/filename of the source object |
+| `destinationBucketName` | `Text` | Bucket to move into (can equal the source) |
+| `destinationObjectName` | `Text` | Full path/filename for the destination |
+
+> **Note:** Move is copy-then-delete and is not atomic — the source is removed only after a successful copy.
+
 #### `Object_GetSignedUrl`
 Generates a time-limited V4 signed URL for secure, direct-to-browser file access. The `operation` controls the action the URL permits: download, upload, or delete.
 

@@ -48,6 +48,22 @@ public interface IGoogleCloudStorage
         [OSParameter(Description = "Bucket Name")] string bucketName,
         [OSParameter(Description = "Object Name")] string objectName);
 
+    [OSAction(Description = "Copies an object to another location, within the same bucket or across buckets, without downloading its content. If the destination object exists, it will be overwritten.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    void Object_Copy(
+        [OSParameter(Description = "Authentication credentials")] Authentication authentication,
+        [OSParameter(Description = "The bucket that currently contains the object")] string sourceBucketName,
+        [OSParameter(Description = "The full path/name of the source object")] string sourceObjectName,
+        [OSParameter(Description = "The bucket to copy the object into (can be the same as the source)")] string destinationBucketName,
+        [OSParameter(Description = "The full path/name for the destination object")] string destinationObjectName);
+
+    [OSAction(Description = "Moves an object to another location (copy + delete of the source), within the same bucket or across buckets. Use the same source and destination bucket to rename an object. If the destination exists, it will be overwritten.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    void Object_Move(
+        [OSParameter(Description = "Authentication credentials")] Authentication authentication,
+        [OSParameter(Description = "The bucket that currently contains the object")] string sourceBucketName,
+        [OSParameter(Description = "The full path/name of the source object")] string sourceObjectName,
+        [OSParameter(Description = "The bucket to move the object into (can be the same as the source)")] string destinationBucketName,
+        [OSParameter(Description = "The full path/name for the destination object")] string destinationObjectName);
+
     [OSAction(Description = "Generates a temporary signed URL for an object. The Operation controls whether the URL allows download (GET), upload (PUT), or delete (DELETE).", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_GetSignedUrl(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
