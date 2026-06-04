@@ -117,6 +117,19 @@ public class GoogleCloudStorage : IGoogleCloudStorage
         storageClient.DeleteObject(bucketName, objectName);
     }
 
+    public void Object_Copy(Authentication authentication, string sourceBucketName, string sourceObjectName, string destinationBucketName, string destinationObjectName)
+    {
+        var storageClient = GetStorageClient(authentication);
+        storageClient.CopyObject(sourceBucketName, sourceObjectName, destinationBucketName, destinationObjectName);
+    }
+
+    public void Object_Move(Authentication authentication, string sourceBucketName, string sourceObjectName, string destinationBucketName, string destinationObjectName)
+    {
+        var storageClient = GetStorageClient(authentication);
+        storageClient.CopyObject(sourceBucketName, sourceObjectName, destinationBucketName, destinationObjectName);
+        storageClient.DeleteObject(sourceBucketName, sourceObjectName);
+    }
+
     public void Object_GetSignedUrl(Authentication authentication, string bucketName, string objectName, int expirationMinutes, out string url, string operation = "Download")
     {
         var credential = GetServiceAccountCredential(authentication);
