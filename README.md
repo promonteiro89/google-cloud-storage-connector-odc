@@ -1,11 +1,11 @@
 # Google Cloud Storage Connector for ODC
 
 [![Platform](https://img.shields.io/badge/Platform-OutSystems_ODC-red.svg)](https://www.outsystems.com/odc/)
-[![.NET](https://img.shields.io/badge/.NET-8.0-blue.svg)](https://dotnet.microsoft.com/download/dotnet/8.0)
+[![.NET](https://img.shields.io/badge/.NET-10.0-blue.svg)](https://dotnet.microsoft.com/download/dotnet/10.0)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![GCS SDK](https://img.shields.io/badge/SDK-Google_Cloud_Storage-green.svg)](https://cloud.google.com/dotnet/docs/reference/Google.Cloud.Storage.V1/latest)
 
-A high-performance .NET 8.0 External Logic component for OutSystems Developer Cloud (ODC) that provides a seamless integration with Google Cloud Storage (GCS). Designed for enterprise-grade scalability, security, and developer efficiency.
+A high-performance .NET 10.0 External Logic component for OutSystems Developer Cloud (ODC) that provides a seamless integration with Google Cloud Storage (GCS). Designed for enterprise-grade scalability, security, and developer efficiency.
 
 ## Table of Contents
 
@@ -47,7 +47,7 @@ The connector is architected as a **stateless adapter**. It bridges the OutSyste
 ## Prerequisites
 
 - [OutSystems Developer Cloud (ODC)](https://www.outsystems.com/odc/)
-- [.NET 8.0 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
+- [.NET 10.0 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - An active Google Cloud Project with Billing enabled.
 - A Service Account with the following IAM roles:
   - `Storage Object Admin` (full object control)
@@ -63,7 +63,7 @@ The connector is architected as a **stateless adapter**. It bridges the OutSyste
 dotnet build GoogleCloudStorage.csproj -c Release
 
 # Publish for ODC (standard deployment)
-dotnet publish GoogleCloudStorage.csproj -c Release -f net8.0 --no-self-contained
+dotnet publish GoogleCloudStorage.csproj -c Release -f net10.0 --no-self-contained
 ```
 
 After publishing, zip the contents of the `publish/` folder (**excluding** `OutSystems.ExternalLibraries.SDK.dll`) and upload it to the ODC Portal.
