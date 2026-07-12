@@ -12,6 +12,11 @@ __MACOSX/
 ._*
 .*
 
+# ...but the broad ".*" above must not swallow tracked dotfiles / config.
+!.gitignore
+!.gitattributes
+!.github/
+
 # Build output (zip is created from here, not committed)
 publish/
 odc-package/
