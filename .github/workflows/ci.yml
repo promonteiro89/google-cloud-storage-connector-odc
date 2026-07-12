@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    env:
+      # Shared by the cache step and the test fixture, so the downloaded
+      # fake-gcs-server binary is reused across runs.
+      FAKE_GCS_DIR: ${{ github.workspace }}/.fake-gcs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache fake-gcs-server
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FAKE_GCS_DIR }}
+          key: fake-gcs-server-1.54.0-linux-amd64
+
+      - name: Build connector (Release, .NET 10)
+        run: dotnet build GoogleCloudStorage.csproj -c Release
+
+      - name: Run test suite (offline + emulator integration)
+        run: dotnet test tests/GoogleCloudStorage.Tests/GoogleCloudStorage.Tests.csproj -c Debug --logger "console;verbosity=normal"
