@@ -20,12 +20,17 @@ public interface IGoogleCloudStorage
         [OSParameter(Description = "Object Name")] string objectName,
         [OSParameter(Description = "The downloaded file")] out OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.File file);
 
-    [OSAction(Description = "Lists objects in a bucket with an optional prefix filter.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    [OSAction(Description = "Lists objects in a bucket, optionally filtered by prefix, with support for pagination (MaxResults/PageToken) and folder-style navigation (Delimiter).", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_List(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "Bucket Name")] string bucketName,
-        [OSParameter(Description = "Prefix filter")] string prefix,
-        [OSParameter(Description = "List of GCS objects")] out IEnumerable<OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.Object> objects);
+        [OSParameter(Description = "Prefix filter for hierarchical navigation")] string prefix,
+        [OSParameter(Description = "Maximum number of objects to return in this call. 0 (default) returns all objects. When greater than 0, use NextPageToken to fetch the following page.")] int maxResults,
+        [OSParameter(Description = "The NextPageToken returned by a previous call. Leave empty to start from the first page.")] string pageToken,
+        [OSParameter(Description = "Set to '/' for folder-style navigation: objects in nested subfolders are grouped into PrefixList instead of being returned individually. Leave empty to list all objects recursively.")] string delimiter,
+        [OSParameter(Description = "List of GCS objects")] out IEnumerable<OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.Object> objects,
+        [OSParameter(Description = "Non-empty when more results exist (paged mode only) - pass it as PageToken in the next call. Empty when the listing is complete.")] out string nextPageToken,
+        [OSParameter(Description = "The 'folders' found directly under Prefix when Delimiter is set.")] out IEnumerable<Prefix> prefixList);
 
     [OSAction(Description = "Checks whether an object exists in a bucket.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_Exists(
@@ -69,9 +74,10 @@ public interface IGoogleCloudStorage
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "Bucket Name")] string bucketName,
         [OSParameter(Description = "Object Name")] string objectName,
-        [OSParameter(Description = "Expiration time in minutes")] int expirationMinutes,
+        [OSParameter(Description = "Expiration time in minutes (1 to 10080; a Google Cloud V4 signed URL is valid for at most 7 days).")] int expirationMinutes,
         [OSParameter(Description = "The temporary secure URL")] out string url,
-        [OSParameter(Description = "The operation the URL will permit: 'Download' (GET), 'Upload' (PUT), or 'Delete' (DELETE). Defaults to 'Download'.")] string operation = "Download");
+        [OSParameter(Description = "The operation the URL will permit: 'Download' (GET), 'Upload' (PUT), or 'Delete' (DELETE). Defaults to 'Download'.")] string operation = "Download",
+        [OSParameter(Description = "Optional, for Upload URLs: the exact Content-Type the client will send in the PUT request. It becomes part of the signature, so Google rejects uploads with a different Content-Type. Leave empty to allow any.")] string contentType = "");
 
     [OSAction(Description = "Lists all buckets in the specified project.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Bucket_List(
@@ -88,4 +94,10 @@ public interface IGoogleCloudStorage
     void Bucket_Delete(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "Bucket Name")] string bucketName);
+
+    [OSAction(Description = "Checks whether a bucket exists and is accessible to the service account, without listing its contents.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    void Bucket_Exists(
+        [OSParameter(Description = "Authentication credentials")] Authentication authentication,
+        [OSParameter(Description = "Bucket Name")] string bucketName,
+        [OSParameter(Description = "True if the bucket exists and the service account can access it")] out bool exists);
 }

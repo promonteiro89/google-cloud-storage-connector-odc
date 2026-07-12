@@ -35,10 +35,11 @@ GoogleCloudStorage_ODC/
 └── Structures/                 # Strongly-typed ODC structures
 ```
 
-The connector is architected as a **stateless adapter**. It bridges the OutSystems Developer Cloud runtime with the official Google Cloud Storage .NET SDK using the **Bridge Pattern**. This ensures that the OutSystems application logic remains decoupled from the low-level SDK implementation details.
+The connector is architected as an **adapter**. It bridges the OutSystems Developer Cloud runtime with the official Google Cloud Storage .NET SDK using the **Bridge Pattern**. This ensures that the OutSystems application logic remains decoupled from the low-level SDK implementation details.
 
 ### Key Architectural Decisions:
-- **Stateless Execution:** The storage client is initialized per request, preventing state leakage and ensuring thread safety in high-concurrency ODC environments.
+- **Cached, thread-safe clients:** `StorageClient` and `UrlSigner` instances are cached per service account (keyed by a SHA-256 hash of the credentials, never the raw key) and reused across requests. This avoids re-parsing the RSA private key and allocating a new `HttpClient` on every call — both types are thread-safe, so sharing them is safe under high concurrency and prevents socket exhaustion.
+- **Actionable errors:** Google API failures are translated into clear, actionable messages (missing bucket vs. object, access denied, unauthenticated, bucket-not-empty, credential mismatch), with the original exception preserved as the inner exception for diagnostics.
 - **V4 Signed URLs:** Offloads large file data transfers directly to the client browser, bypassing the ODC server to optimize memory and bandwidth.
 - **Resource Embedding:** Branded icons are embedded directly into the assembly to provide a premium integrated experience in Service Studio.
 
@@ -113,7 +114,7 @@ Retrieves a file and its metadata from GCS.
 | `file` | `File` | Structure containing Binary Content and system ContentType |
 
 #### `Object_List`
-Lists objects in a bucket with an optional prefix filter.
+Lists objects in a bucket, optionally filtered by prefix, with support for pagination (`MaxResults`/`PageToken`) and folder-style navigation (`Delimiter`).
 
 **Arguments:**
 | Argument | Type | Description |
@@ -121,11 +122,18 @@ Lists objects in a bucket with an optional prefix filter.
 | `authentication` | `Authentication` | GCP credentials |
 | `bucketName` | `Text` | Source bucket |
 | `prefix` | `Text` | Prefix filter for hierarchical navigation |
+| `maxResults` | `Integer` | Maximum objects to return in this call; `0` returns everything. When greater than `0`, use `NextPageToken` to fetch the next page. |
+| `pageToken` | `Text` | Continuation token from a previous call's `NextPageToken`; empty starts from the first page |
+| `delimiter` | `Text` | Typically `/` — groups nested objects into `PrefixList` for folder-style browsing; empty lists recursively |
 
 **Outputs:**
 | Output | Type | Description |
 |--------|------|-------------|
 | `objects` | `List of Object` | Collection of GCS object metadata |
+| `nextPageToken` | `Text` | Non-empty when more results exist (paged mode only) — pass it as `PageToken` in the next call |
+| `prefixList` | `List of Prefix` | The "folders" found directly under `Prefix` when `Delimiter` is set |
+
+> **Pagination:** pass a `MaxResults` greater than `0` to return a single page, then feed the returned `NextPageToken` back as `PageToken` until it comes back empty. With `MaxResults = 0` every object is returned in one call (no `NextPageToken`).
 
 #### `Object_Exists`
 Checks whether an object exists in a bucket via a lightweight metadata probe.
@@ -203,8 +211,9 @@ Generates a time-limited V4 signed URL for secure, direct-to-browser file access
 | `authentication` | `Authentication` | GCP credentials |
 | `bucketName` | `Text` | Source bucket |
 | `objectName` | `Text` | Full path/filename |
-| `expirationMinutes` | `Integer` | Link validity duration |
+| `expirationMinutes` | `Integer` | Link validity duration, `1`–`10080` (a V4 signed URL is valid for at most 7 days). Values outside this range raise a clear error. |
 | `operation` | `Text` | Optional. `Download` (GET), `Upload` (PUT), or `Delete` (DELETE). Case-insensitive. Defaults to `Download`. |
+| `contentType` | `Text` | Optional, for `Upload` URLs. The exact `Content-Type` the client will send in the PUT request. It becomes part of the signature, so Google rejects uploads with a different `Content-Type`. Leave empty to allow any. |
 
 **Outputs:**
 | Output | Type | Description |
@@ -212,6 +221,8 @@ Generates a time-limited V4 signed URL for secure, direct-to-browser file access
 | `url` | `Text` | Temporary secure URL. For `Upload`, the client sends an HTTP PUT with the file as the body. |
 
 > **Multi-upload:** signed URLs are bound to a specific object path, so request one `Upload` URL per file (pass each file's `objectName`).
+>
+> **Content-Type binding:** if you pass `contentType`, the client's PUT must send exactly that `Content-Type` header, or Google rejects the upload with a signature mismatch. Leave it empty to accept any content type.
 
 ---
 
@@ -249,6 +260,20 @@ Decommissioning of an empty storage container.
 | `authentication` | `Authentication` | GCP credentials |
 | `bucketName` | `Text` | Name of the bucket to delete |
 
+#### `Bucket_Exists`
+Checks whether a bucket exists and is accessible to the service account, without listing its contents.
+
+**Arguments:**
+| Argument | Type | Description |
+|----------|------|-------------|
+| `authentication` | `Authentication` | GCP credentials |
+| `bucketName` | `Text` | Name of the bucket to check |
+
+**Outputs:**
+| Output | Type | Description |
+|--------|------|-------------|
+| `exists` | `Boolean` | True if the bucket exists and the service account can access it |
+
 ---
 
 ## Data Structures
@@ -277,6 +302,10 @@ Represents storage container metadata.
 - `Location`: Text
 - `StorageClass`: Text
 - `Created`: Date Time (UTC)
+
+### `Prefix`
+A folder-style entry returned by `Object_List` when `Delimiter` is set — a common prefix shared by the objects grouped under it.
+- `Value`: Text (e.g., `images/thumbnails/`)
 
 ### `ObjectMetadata`
 Represents the complete metadata of an object (returned by `Object_GetMetadata`).
@@ -314,7 +343,8 @@ GoogleCloudStorage_ODC/
     ├── File.cs                 # Binary wrapper
     ├── Bucket.cs               # Container metadata
     ├── Object.cs               # File metadata (list entry)
-    └── ObjectMetadata.cs       # Full object metadata
+    ├── ObjectMetadata.cs       # Full object metadata
+    └── Prefix.cs               # Folder-style entry (Object_List with Delimiter)
 ```
 
 ---
