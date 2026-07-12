@@ -345,9 +345,23 @@ public class GoogleCloudStorage : IGoogleCloudStorage
 
     /// <summary>
     /// Returns a cached StorageClient for the given service account, creating it on first use.
+    /// Honors the GCSCONNECTOR_EMULATOR_HOST environment variable (never set on a real ODC
+    /// server): when present, connects unauthenticated to a local GCS emulator such as
+    /// fake-gcs-server, enabling integration tests without Google credentials. The name is
+    /// deliberately extension-specific (not Google's STORAGE_EMULATOR_HOST) so a machine-wide
+    /// variable set for other tooling can never silently redirect this connector.
     /// </summary>
     private static StorageClient GetStorageClient(Authentication authentication)
     {
+        string? emulatorHost = Environment.GetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST");
+        if (!string.IsNullOrEmpty(emulatorHost))
+        {
+            string baseUri = (emulatorHost.Contains("://") ? emulatorHost : "http://" + emulatorHost).TrimEnd('/') + "/storage/v1/";
+            return StorageClientCache.GetOrAdd(
+                "emulator|" + baseUri,
+                _ => new StorageClientBuilder { BaseUri = baseUri, UnauthenticatedAccess = true }.Build());
+        }
+
         return StorageClientCache.GetOrAdd(
             GetCredentialCacheKey(authentication.ClientEmail, authentication.PrivateKey),
             _ => StorageClient.Create(GetServiceAccountCredential(authentication).ToGoogleCredential()));

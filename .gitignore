@@ -14,3 +14,9 @@ __MACOSX/
 
 # Build output (zip is created from here, not committed)
 publish/
+odc-package/
+
+# Test artifacts
+TestResults/
+tests/**/.tools/
+[Tt]est[Rr]esults/

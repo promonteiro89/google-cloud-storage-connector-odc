@@ -358,6 +358,20 @@ GoogleCloudStorage_ODC/
 
 ---
 
+## Testing
+
+A full test suite lives in [`tests/`](tests/README.md) and covers every action — **no Google account or credentials required**:
+
+```bash
+dotnet test                                          # offline + emulator integration
+dotnet test --filter "FullyQualifiedName~OfflineTests"   # offline only, no network
+```
+
+- **Offline tests** (signed URLs, validation, caching) use a throwaway in-memory RSA key — V4 signing is local cryptography.
+- **Integration tests** run the connector against [fake-gcs-server](https://github.com/fsouza/fake-gcs-server) via the `GCSCONNECTOR_EMULATOR_HOST` hook. This variable is honored **only for local testing** and is never set on a real ODC server, where the connector always talks to production GCS. The test fixture starts the emulator automatically and skips (rather than fails) if it can't. See [`tests/README.md`](tests/README.md) for details.
+
+---
+
 ## Best Practices
 
 - **Security:** Mark `PrivateKey` as a **Secret** App Setting in ODC to ensure it is encrypted and masked in logs.

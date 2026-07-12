@@ -6,6 +6,8 @@
     <Nullable>enable</Nullable>
     <RootNamespace>OutSystems.ExternalLibraries.GoogleCloudStorage_Connector</RootNamespace>
     <AssemblyName>OutSystems.ExternalLibraries.GoogleCloudStorage_Connector</AssemblyName>
+    <!-- The test project lives under tests/; keep its sources out of the connector assembly. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>
