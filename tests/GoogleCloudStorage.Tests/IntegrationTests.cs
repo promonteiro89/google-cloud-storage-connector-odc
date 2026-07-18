@@ -3,6 +3,7 @@ using OutSystems.ExternalLibraries.GoogleCloudStorage_Connector;
 using Xunit;
 using Connector = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.GoogleCloudStorage;
 using GcsFile = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.File;
+using MetadataEntry = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.MetadataEntry;
 
 namespace GoogleCloudStorage.Tests;
 
@@ -28,8 +29,8 @@ public class IntegrationTests
         return name;
     }
 
-    private void Upload(string bucket, string name, byte[] content, string contentType) =>
-        _sut.Object_Upload(TestSupport.Auth(), bucket, name, new GcsFile { Content = content, ContentType = contentType });
+    private void Upload(string bucket, string name, byte[] content, string contentType, IEnumerable<MetadataEntry>? metadata = null) =>
+        _sut.Object_Upload(TestSupport.Auth(), bucket, name, new GcsFile { Content = content, ContentType = contentType }, metadata ?? []);
 
     private void Cleanup(string bucket)
     {
@@ -148,7 +149,7 @@ public class IntegrationTests
         {
             Upload(b, "docs/a.txt", Encoding.UTF8.GetBytes("content A"), "text/plain");
 
-            _sut.Object_GetMetadata(TestSupport.Auth(), b, "docs/a.txt", out var exists, out var md);
+            _sut.Object_GetMetadata(TestSupport.Auth(), b, "docs/a.txt", out var exists, out var md, out _);
             Assert.True(exists);
             Assert.Equal("docs/a.txt", md.Name);
             Assert.Equal(b, md.Bucket);
@@ -160,8 +161,105 @@ public class IntegrationTests
             Assert.False(string.IsNullOrEmpty(md.MD5Hash));
             Assert.False(string.IsNullOrEmpty(md.Crc32c));
 
-            _sut.Object_GetMetadata(TestSupport.Auth(), b, "nope.txt", out var missing, out _);
+            _sut.Object_GetMetadata(TestSupport.Auth(), b, "nope.txt", out var missing, out _, out _);
             Assert.False(missing);
+        }
+        finally { Cleanup(b); }
+    }
+
+    // ---- custom metadata: upload round-trip + update -----------------------------------
+
+    [SkippableFact]
+    public void Custom_metadata_round_trips_through_upload_and_getmetadata()
+    {
+        RequireEmulator();
+        var b = NewBucket();
+        try
+        {
+            var meta = new List<MetadataEntry>
+            {
+                new() { Key = "tenant", Value = "acme" },
+                new() { Key = "documentType", Value = "invoice" }
+            };
+            Upload(b, "docs/inv.pdf", Encoding.UTF8.GetBytes("pdf"), "application/pdf", meta);
+
+            _sut.Object_GetMetadata(TestSupport.Auth(), b, "docs/inv.pdf", out var exists, out _, out var custom);
+            Assert.True(exists);
+            var dict = custom.ToDictionary(e => e.Key, e => e.Value);
+            Assert.Equal("acme", dict["tenant"]);
+            Assert.Equal("invoice", dict["documentType"]);
+        }
+        finally { Cleanup(b); }
+    }
+
+    [SkippableFact]
+    public void UpdateMetadata_changes_headers_and_adds_overwrites_removes_keys_without_touching_content()
+    {
+        RequireEmulator();
+        var b = NewBucket();
+        try
+        {
+            var original = Encoding.UTF8.GetBytes("the content");
+            Upload(b, "f.bin", original, "application/octet-stream", new List<MetadataEntry>
+            {
+                new() { Key = "keep", Value = "1" },
+                new() { Key = "drop", Value = "old" }
+            });
+
+            _sut.Object_UpdateMetadata(TestSupport.Auth(), b, "f.bin",
+                contentType: "text/plain",
+                contentEncoding: "",
+                contentDisposition: "attachment; filename=\"f.txt\"",
+                cacheControl: "",
+                metadata: new List<MetadataEntry>
+                {
+                    new() { Key = "drop", Value = "" },        // empty value removes the key
+                    new() { Key = "added", Value = "yes" },    // new key
+                    new() { Key = "keep", Value = "2" }        // overwrite
+                });
+
+            _sut.Object_GetMetadata(TestSupport.Auth(), b, "f.bin", out _, out var md, out var custom);
+            Assert.Equal("text/plain", md.ContentType);
+            Assert.Equal("attachment; filename=\"f.txt\"", md.ContentDisposition);
+            var dict = custom.ToDictionary(e => e.Key, e => e.Value);
+            Assert.Equal("2", dict["keep"]);
+            Assert.Equal("yes", dict["added"]);
+            Assert.False(dict.ContainsKey("drop"));
+
+            // Content is untouched by a metadata-only update.
+            _sut.Object_Download(TestSupport.Auth(), b, "f.bin", out var file);
+            Assert.Equal(original, file.Content);
+        }
+        finally { Cleanup(b); }
+    }
+
+    // ---- delete by prefix --------------------------------------------------------------
+
+    [SkippableFact]
+    public void DeleteByPrefix_deletes_the_folder_and_returns_the_count()
+    {
+        RequireEmulator();
+        var b = NewBucket();
+        try
+        {
+            Upload(b, "uploads/2025/a.txt", Encoding.UTF8.GetBytes("a"), "text/plain");
+            Upload(b, "uploads/2025/b.txt", Encoding.UTF8.GetBytes("b"), "text/plain");
+            Upload(b, "uploads/2025/sub/c.txt", Encoding.UTF8.GetBytes("c"), "text/plain");
+            Upload(b, "uploads/2024/keep.txt", Encoding.UTF8.GetBytes("k"), "text/plain");
+            Upload(b, "other.txt", Encoding.UTF8.GetBytes("o"), "text/plain");
+
+            _sut.Object_DeleteByPrefix(TestSupport.Auth(), b, "uploads/2025/", out var deleted);
+            Assert.Equal(3, deleted);
+
+            // Everything under the prefix is gone; siblings survive.
+            _sut.Object_Exists(TestSupport.Auth(), b, "uploads/2025/a.txt", out var gone1);
+            _sut.Object_Exists(TestSupport.Auth(), b, "uploads/2025/sub/c.txt", out var gone2);
+            _sut.Object_Exists(TestSupport.Auth(), b, "uploads/2024/keep.txt", out var kept1);
+            _sut.Object_Exists(TestSupport.Auth(), b, "other.txt", out var kept2);
+            Assert.False(gone1);
+            Assert.False(gone2);
+            Assert.True(kept1);
+            Assert.True(kept2);
         }
         finally { Cleanup(b); }
     }
@@ -295,7 +393,7 @@ public class IntegrationTests
                 _sut.Object_Download(TestSupport.Auth(), b, "does-not-exist.txt", out _));
 
             Assert.ThrowsAny<Exception>(() =>
-                _sut.Object_Upload(TestSupport.Auth(), "no-such-bucket-" + Guid.NewGuid().ToString("N")[..8], "f.txt", new GcsFile { Content = [1], ContentType = "text/plain" }));
+                _sut.Object_Upload(TestSupport.Auth(), "no-such-bucket-" + Guid.NewGuid().ToString("N")[..8], "f.txt", new GcsFile { Content = [1], ContentType = "text/plain" }, []));
 
             Assert.ThrowsAny<Exception>(() =>
                 _sut.Bucket_Delete(TestSupport.Auth(), b)); // non-empty

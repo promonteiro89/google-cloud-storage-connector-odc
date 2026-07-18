@@ -6,12 +6,13 @@ namespace OutSystems.ExternalLibraries.GoogleCloudStorage_Connector;
 [OSInterface(Description = "Google Cloud Storage connector for ODC.", Name = "GoogleCloudStorage_Connector", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.app_icon.png")]
 public interface IGoogleCloudStorage
 {
-    [OSAction(Description = "Uploads an object to a bucket.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    [OSAction(Description = "Uploads an object to a bucket, optionally with custom key-value metadata.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_Upload(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "Bucket Name")] string bucketName,
         [OSParameter(Description = "Object Name")] string objectName,
-        [OSParameter(Description = "File to upload")] OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.File file);
+        [OSParameter(Description = "File to upload")] OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.File file,
+        [OSParameter(Description = "Optional custom key-value metadata to store with the object (e.g. user id, tenant, document type). Retrievable via Object_GetMetadata. Leave empty for none.")] IEnumerable<MetadataEntry> metadata);
 
     [OSAction(Description = "Downloads an object from a bucket.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_Download(
@@ -39,13 +40,14 @@ public interface IGoogleCloudStorage
         [OSParameter(Description = "Object Name")] string objectName,
         [OSParameter(Description = "True if the object exists")] out bool exists);
 
-    [OSAction(Description = "Retrieves an object's metadata (size, content type, hashes, generation, storage class, timestamps) without downloading its content.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    [OSAction(Description = "Retrieves an object's metadata (size, content type, hashes, generation, storage class, timestamps, and custom key-value metadata) without downloading its content.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_GetMetadata(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "Bucket Name")] string bucketName,
         [OSParameter(Description = "Object Name")] string objectName,
         [OSParameter(Description = "True if the object was found, False otherwise")] out bool exists,
-        [OSParameter(Description = "The object's metadata (only populated when Exists is True)")] out OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.ObjectMetadata metadata);
+        [OSParameter(Description = "The object's metadata (only populated when Exists is True)")] out OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.ObjectMetadata metadata,
+        [OSParameter(Description = "The object's custom key-value metadata. Empty when the object has none or does not exist.")] out IEnumerable<MetadataEntry> customMetadata);
 
     [OSAction(Description = "Deletes an object from a bucket.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_Delete(
@@ -68,6 +70,24 @@ public interface IGoogleCloudStorage
         [OSParameter(Description = "The full path/name of the source object")] string sourceObjectName,
         [OSParameter(Description = "The bucket to move the object into (can be the same as the source)")] string destinationBucketName,
         [OSParameter(Description = "The full path/name for the destination object")] string destinationObjectName);
+
+    [OSAction(Description = "Updates an object's metadata without re-uploading its content. Only the provided fields change: empty text inputs leave the corresponding field untouched, and an empty Metadata list leaves custom metadata untouched. Within Metadata, an entry with an empty Value removes that key.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    void Object_UpdateMetadata(
+        [OSParameter(Description = "Authentication credentials")] Authentication authentication,
+        [OSParameter(Description = "Bucket Name")] string bucketName,
+        [OSParameter(Description = "The full path/name of the object to update")] string objectName,
+        [OSParameter(Description = "New MIME type. Empty = unchanged.")] string contentType,
+        [OSParameter(Description = "New content encoding (e.g. 'gzip'). Empty = unchanged.")] string contentEncoding,
+        [OSParameter(Description = "New content disposition (e.g. 'attachment; filename=\"report.pdf\"'). Empty = unchanged.")] string contentDisposition,
+        [OSParameter(Description = "New cache control (e.g. 'public, max-age=3600'). Empty = unchanged.")] string cacheControl,
+        [OSParameter(Description = "Custom metadata changes. Empty list = unchanged. An entry with an empty Value removes that key; others are set/overwritten.")] IEnumerable<MetadataEntry> metadata);
+
+    [OSAction(Description = "Deletes all objects whose names start with the given prefix (a 'folder' and everything under it). The Prefix is mandatory and cannot be empty, as a safety measure against accidentally wiping an entire bucket. Returns the number of objects deleted.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    void Object_DeleteByPrefix(
+        [OSParameter(Description = "Authentication credentials")] Authentication authentication,
+        [OSParameter(Description = "Bucket Name")] string bucketName,
+        [OSParameter(Description = "All objects whose names start with this prefix are deleted (e.g. 'uploads/2025/'). Cannot be empty.")] string prefix,
+        [OSParameter(Description = "Number of objects that were deleted")] out long deletedCount);
 
     [OSAction(Description = "Generates a temporary signed URL for an object. The Operation controls whether the URL allows download (GET), upload (PUT), or delete (DELETE).", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_GetSignedUrl(

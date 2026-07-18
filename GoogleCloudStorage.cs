@@ -27,13 +27,21 @@ public class GoogleCloudStorage : IGoogleCloudStorage
     private static readonly ConcurrentDictionary<string, StorageClient> StorageClientCache = new();
     private static readonly ConcurrentDictionary<string, UrlSigner> UrlSignerCache = new();
 
-    public void Object_Upload(Authentication authentication, string bucketName, string objectName, File file)
+    public void Object_Upload(Authentication authentication, string bucketName, string objectName, File file, IEnumerable<MetadataEntry> metadata)
     {
         var storageClient = GetStorageClient(authentication);
         try
         {
+            var gcsObject = new Google.Apis.Storage.v1.Data.Object
+            {
+                Bucket = bucketName,
+                Name = objectName,
+                ContentType = file.ContentType,
+                Metadata = ToMetadataDictionary(metadata)
+            };
+
             using var stream = new MemoryStream(file.Content);
-            storageClient.UploadObject(bucketName, objectName, file.ContentType, stream);
+            storageClient.UploadObject(gcsObject, stream);
         }
         catch (Google.GoogleApiException e) { throw FriendlyException(e, authentication.ClientEmail, bucketName, null); }
         catch (TokenResponseException e) { throw FriendlyAuthException(e, authentication.ClientEmail); }
@@ -133,11 +141,12 @@ public class GoogleCloudStorage : IGoogleCloudStorage
         catch (TokenResponseException e) { throw FriendlyAuthException(e, authentication.ClientEmail); }
     }
 
-    public void Object_GetMetadata(Authentication authentication, string bucketName, string objectName, out bool exists, out ObjectMetadata metadata)
+    public void Object_GetMetadata(Authentication authentication, string bucketName, string objectName, out bool exists, out ObjectMetadata metadata, out IEnumerable<MetadataEntry> customMetadata)
     {
         var storageClient = GetStorageClient(authentication);
         exists = false;
         metadata = new ObjectMetadata();
+        var custom = new List<MetadataEntry>();
 
         try
         {
@@ -163,6 +172,12 @@ public class GoogleCloudStorage : IGoogleCloudStorage
                 TimeCreated = ParseTimestamp(obj.TimeCreatedRaw),
                 Updated = ParseTimestamp(obj.UpdatedRaw)
             };
+
+            if (obj.Metadata != null)
+            {
+                foreach (var kv in obj.Metadata)
+                    custom.Add(new MetadataEntry { Key = kv.Key, Value = kv.Value ?? string.Empty });
+            }
         }
         catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound && !IsBucketNotFound(e))
         {
@@ -170,6 +185,8 @@ public class GoogleCloudStorage : IGoogleCloudStorage
         }
         catch (Google.GoogleApiException e) { throw FriendlyException(e, authentication.ClientEmail, bucketName, objectName); }
         catch (TokenResponseException e) { throw FriendlyAuthException(e, authentication.ClientEmail); }
+
+        customMetadata = custom;
     }
 
     public void Object_Delete(Authentication authentication, string bucketName, string objectName)
@@ -214,6 +231,85 @@ public class GoogleCloudStorage : IGoogleCloudStorage
         {
             throw new Exception($"The object was copied to '{destinationBucketName}/{destinationObjectName}' but the source '{sourceBucketName}/{sourceObjectName}' could not be deleted - both objects currently exist. Cause: {e.Message}", e);
         }
+    }
+
+    public void Object_UpdateMetadata(Authentication authentication, string bucketName, string objectName, string contentType, string contentEncoding, string contentDisposition, string cacheControl, IEnumerable<MetadataEntry> metadata)
+    {
+        var changes = ToMetadataDictionary(metadata);
+        bool hasFieldChange = !string.IsNullOrEmpty(contentType) || !string.IsNullOrEmpty(contentEncoding)
+            || !string.IsNullOrEmpty(contentDisposition) || !string.IsNullOrEmpty(cacheControl);
+        if (!hasFieldChange && changes == null)
+            throw new ArgumentException("Nothing to update: provide at least one of ContentType, ContentEncoding, ContentDisposition, CacheControl, or a non-empty Metadata list.");
+
+        var storageClient = GetStorageClient(authentication);
+
+        try
+        {
+            // Read-modify-write: fetch the current object, apply only the provided changes, and
+            // write it back guarded by a metageneration precondition so a concurrent metadata
+            // change fails cleanly (412) instead of being silently overwritten.
+            var obj = storageClient.GetObject(bucketName, objectName);
+
+            if (!string.IsNullOrEmpty(contentType)) obj.ContentType = contentType;
+            if (!string.IsNullOrEmpty(contentEncoding)) obj.ContentEncoding = contentEncoding;
+            if (!string.IsNullOrEmpty(contentDisposition)) obj.ContentDisposition = contentDisposition;
+            if (!string.IsNullOrEmpty(cacheControl)) obj.CacheControl = cacheControl;
+
+            if (changes != null)
+            {
+                var merged = obj.Metadata != null ? new Dictionary<string, string>(obj.Metadata) : new Dictionary<string, string>();
+                foreach (var kv in changes)
+                {
+                    if (kv.Value.Length == 0) merged.Remove(kv.Key);
+                    else merged[kv.Key] = kv.Value;
+                }
+                obj.Metadata = merged;
+            }
+
+            storageClient.UpdateObject(obj, new UpdateObjectOptions { IfMetagenerationMatch = obj.Metageneration });
+        }
+        catch (Google.GoogleApiException e) { throw FriendlyException(e, authentication.ClientEmail, bucketName, objectName); }
+        catch (TokenResponseException e) { throw FriendlyAuthException(e, authentication.ClientEmail); }
+    }
+
+    public void Object_DeleteByPrefix(Authentication authentication, string bucketName, string prefix, out long deletedCount)
+    {
+        deletedCount = 0;
+        if (string.IsNullOrWhiteSpace(prefix))
+            throw new ArgumentException("Prefix cannot be empty - it would delete every object in the bucket. To do that intentionally, delete the bucket or list and delete the objects explicitly.");
+
+        var storageClient = GetStorageClient(authentication);
+
+        // Materialize the names first so deletions can't interfere with listing pagination.
+        var names = new List<string>();
+        try
+        {
+            foreach (var obj in storageClient.ListObjects(bucketName, prefix))
+                names.Add(obj.Name);
+        }
+        catch (Google.GoogleApiException e) { throw FriendlyException(e, authentication.ClientEmail, bucketName, null); }
+        catch (TokenResponseException e) { throw FriendlyAuthException(e, authentication.ClientEmail); }
+
+        long deleted = 0;
+        foreach (var name in names)
+        {
+            try
+            {
+                storageClient.DeleteObject(bucketName, name);
+                deleted++;
+            }
+            catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
+            {
+                // Already gone (deleted concurrently) - the desired state is reached, keep going.
+            }
+            catch (Google.GoogleApiException e)
+            {
+                throw new Exception($"Deleted {deleted} of {names.Count} objects under prefix '{prefix}', then failed on '{name}': {e.Message}", e);
+            }
+            catch (TokenResponseException e) { throw FriendlyAuthException(e, authentication.ClientEmail); }
+        }
+
+        deletedCount = deleted;
     }
 
     public void Object_GetSignedUrl(Authentication authentication, string bucketName, string objectName, int expirationMinutes, out string url, string operation = "Download", string contentType = "")
@@ -387,6 +483,23 @@ public class GoogleCloudStorage : IGoogleCloudStorage
         if (!string.IsNullOrEmpty(raw) && DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto))
             return dto.UtcDateTime;
         return new DateTime(1900, 1, 1);
+    }
+
+    /// <summary>
+    /// Converts a MetadataEntry list to a dictionary. Entries with an empty Key are ignored; empty
+    /// Values are preserved (Object_UpdateMetadata interprets them as key removal). Returns null
+    /// when the list is null/empty or has no usable entries, meaning "no custom metadata provided".
+    /// </summary>
+    private static Dictionary<string, string>? ToMetadataDictionary(IEnumerable<MetadataEntry>? metadata)
+    {
+        if (metadata == null) return null;
+        var dict = new Dictionary<string, string>();
+        foreach (var entry in metadata)
+        {
+            if (string.IsNullOrEmpty(entry.Key)) continue;
+            dict[entry.Key] = entry.Value ?? string.Empty;
+        }
+        return dict.Count > 0 ? dict : null;
     }
 
     // ---- Error translation -----------------------------------------------------------
