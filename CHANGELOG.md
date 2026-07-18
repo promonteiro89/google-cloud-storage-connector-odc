@@ -4,6 +4,21 @@ All notable changes to the **Google Cloud Storage Connector for ODC** are docume
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-07-18
+
+Custom object metadata, in-place metadata editing, and folder deletion.
+
+### Added
+
+- **Custom object metadata.** `Object_Upload` now accepts an optional `Metadata` input — a list of `MetadataEntry` key-value pairs (e.g. tenant, document type) stored with the object — and `Object_GetMetadata` returns it through the new `CustomMetadata` output.
+- **`Object_UpdateMetadata` action.** Changes `ContentType`, `ContentEncoding`, `ContentDisposition`, `CacheControl`, and custom metadata **without re-uploading the object's content**. Only the provided fields change: empty text inputs leave fields untouched, an entry with an empty `Value` removes that key, and a call with nothing to update is rejected with a clear error. The write is guarded by a metageneration precondition, so concurrent metadata updates fail cleanly instead of silently overwriting each other.
+- **`Object_DeleteByPrefix` action.** Deletes a "folder" — every object under a prefix — server-side and returns the number of objects deleted. The prefix is mandatory and non-empty as a safety guard against wiping an entire bucket; concurrent deletions are tolerated, and a mid-operation failure reports exactly how many objects were already deleted.
+- **`MetadataEntry` structure** (`Key`/`Value`) backing all of the above.
+
+### ⚠️ Breaking changes
+
+- **`Object_Upload` and `Object_GetMetadata` signatures changed** — `Object_Upload` gained a `Metadata` input and `Object_GetMetadata` a `CustomMetadata` output. Existing logic keeps working, but consuming apps must refresh and republish the connector reference to pick up the new signatures.
+
 ## [1.4.0] - 2026-07-12
 
 New object-listing, folder-navigation, and signed-URL capabilities, plus more actionable error reporting. Runs on .NET 10.
@@ -32,4 +47,5 @@ New object-listing, folder-navigation, and signed-URL capabilities, plus more ac
 
 - **`Object_List` signature changed.** It gained required inputs (`MaxResults`, `PageToken`, `Delimiter`) and outputs (`NextPageToken`, `PrefixList`). Apps that consume `Object_List` in Service Studio must remap the action after upgrading. All other changes are backward-compatible — the new `ContentType` on `Object_GetSignedUrl` is optional.
 
+[1.5.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.5.0
 [1.4.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.4.0

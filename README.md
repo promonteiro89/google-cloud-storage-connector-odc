@@ -88,7 +88,7 @@ Authentication is handled via the `Authentication` structure. Credentials should
 ### Object Operations
 
 #### `Object_Upload`
-Persists a file to a specific GCS bucket.
+Persists a file to a specific GCS bucket, optionally with custom metadata.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -97,6 +97,7 @@ Persists a file to a specific GCS bucket.
 | `bucketName` | `Text` | Destination bucket |
 | `objectName` | `Text` | Full path/filename in the bucket |
 | `file` | `File` | Structure containing Binary Content and ContentType |
+| `metadata` | `List of MetadataEntry` | Optional custom key-value metadata to store with the object (e.g. tenant, document type). Retrievable via `Object_GetMetadata`. Leave empty for none. |
 
 #### `Object_Download`
 Retrieves a file and its metadata from GCS.
@@ -151,7 +152,7 @@ Checks whether an object exists in a bucket via a lightweight metadata probe.
 | `exists` | `Boolean` | True if the object exists |
 
 #### `Object_GetMetadata`
-Retrieves an object's full metadata (size, content type, hashes, generation, storage class, timestamps) without downloading its content. Returns `Exists = False` if the object is not found, leaving the `metadata` output empty.
+Retrieves an object's full metadata (size, content type, hashes, generation, storage class, timestamps, and custom metadata) without downloading its content. Returns `Exists = False` if the object is not found, leaving the `metadata` and `customMetadata` outputs empty.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -165,6 +166,7 @@ Retrieves an object's full metadata (size, content type, hashes, generation, sto
 |--------|------|-------------|
 | `exists` | `Boolean` | True if the object was found |
 | `metadata` | `ObjectMetadata` | Full object metadata (only populated when `exists` is True) |
+| `customMetadata` | `List of MetadataEntry` | The object's custom key-value metadata. Empty when the object has none or does not exist. |
 
 #### `Object_Delete`
 Permanently removes an object from a bucket.
@@ -199,6 +201,38 @@ Moves an object to another location (copy + delete of the source), within the sa
 | `sourceObjectName` | `Text` | Full path/filename of the source object |
 | `destinationBucketName` | `Text` | Bucket to move into (can equal the source) |
 | `destinationObjectName` | `Text` | Full path/filename for the destination |
+
+> **Note:** Move is copy-then-delete and is not atomic. If the copy succeeds but the source can't be deleted, the action reports explicitly that both objects now exist.
+
+#### `Object_UpdateMetadata`
+Changes an object's content headers and custom metadata **without re-uploading its content**. Only the fields you provide change: empty text inputs are left untouched, and an empty `metadata` list leaves custom metadata untouched. Within `metadata`, an entry with an empty `Value` **removes** that key. A call with nothing to update is rejected. The write is guarded by a metageneration precondition, so concurrent metadata updates fail cleanly instead of silently overwriting each other.
+
+**Arguments:**
+| Argument | Type | Description |
+|----------|------|-------------|
+| `authentication` | `Authentication` | GCP credentials |
+| `bucketName` | `Text` | Source bucket |
+| `objectName` | `Text` | Full path/filename of the object to update |
+| `contentType` | `Text` | New MIME type. Empty = unchanged. |
+| `contentEncoding` | `Text` | New content encoding (e.g. `gzip`). Empty = unchanged. |
+| `contentDisposition` | `Text` | New content disposition (e.g. `attachment; filename="report.pdf"`). Empty = unchanged. |
+| `cacheControl` | `Text` | New cache control (e.g. `public, max-age=3600`). Empty = unchanged. |
+| `metadata` | `List of MetadataEntry` | Custom metadata changes. Empty list = unchanged. An entry with an empty `Value` removes that key; others are set/overwritten. |
+
+#### `Object_DeleteByPrefix`
+Deletes every object under a prefix (a "folder" and everything below it) server-side, and returns how many were deleted. The prefix is **mandatory and cannot be empty**, as a safety guard against wiping an entire bucket. Concurrent deletions are tolerated; a mid-operation failure reports exactly how many objects were already deleted.
+
+**Arguments:**
+| Argument | Type | Description |
+|----------|------|-------------|
+| `authentication` | `Authentication` | GCP credentials |
+| `bucketName` | `Text` | Source bucket |
+| `prefix` | `Text` | All objects whose names start with this prefix are deleted (e.g. `uploads/2025/`). Cannot be empty. |
+
+**Outputs:**
+| Output | Type | Description |
+|--------|------|-------------|
+| `deletedCount` | `Long Integer` | Number of objects that were deleted |
 
 > **Note:** Move is copy-then-delete and is not atomic — the source is removed only after a successful copy.
 
@@ -307,6 +341,11 @@ Represents storage container metadata.
 A folder-style entry returned by `Object_List` when `Delimiter` is set — a common prefix shared by the objects grouped under it.
 - `Value`: Text (e.g., `images/thumbnails/`)
 
+### `MetadataEntry`
+A single custom metadata key-value pair stored with an object. Used by `Object_Upload` (input), `Object_GetMetadata` (output), and `Object_UpdateMetadata` (input).
+- `Key`: Text (e.g., `tenant`, `documentType`)
+- `Value`: Text (an empty `Value` removes the key in `Object_UpdateMetadata`)
+
 ### `ObjectMetadata`
 Represents the complete metadata of an object (returned by `Object_GetMetadata`).
 - `Name`: Text (Full path)
@@ -344,7 +383,8 @@ GoogleCloudStorage_ODC/
     ├── Bucket.cs               # Container metadata
     ├── Object.cs               # File metadata (list entry)
     ├── ObjectMetadata.cs       # Full object metadata
-    └── Prefix.cs               # Folder-style entry (Object_List with Delimiter)
+    ├── Prefix.cs               # Folder-style entry (Object_List with Delimiter)
+    └── MetadataEntry.cs        # Custom key-value metadata pair
 ```
 
 ---
@@ -377,6 +417,9 @@ dotnet test --filter "FullyQualifiedName~OfflineTests"   # offline only, no netw
 - **Security:** Mark `PrivateKey` as a **Secret** App Setting in ODC to ensure it is encrypted and masked in logs.
 - **Efficiency:** For files larger than 100MB, always use `Object_GetSignedUrl` to avoid server-side memory pressure.
 - **Naming:** Follow GCS bucket naming constraints (3-63 characters, lowercase letters, numbers, and hyphens).
+- **Tag your objects:** Use the `metadata` input on `Object_Upload` (or `Object_UpdateMetadata` later) to attach business context — tenant, owner, document type — that you can read back cheaply with `Object_GetMetadata` without downloading the file.
+- **Edit metadata in place:** Use `Object_UpdateMetadata` to fix a `ContentType` or relabel objects without re-uploading their content; it is metageneration-guarded so concurrent edits fail cleanly.
+- **Delete folders safely:** Use `Object_DeleteByPrefix` to remove a whole "folder" in one call — the mandatory, non-empty prefix guards against wiping an entire bucket by accident.
 
 ---
 

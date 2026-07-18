@@ -99,6 +99,29 @@ public class OfflineTests
             _sut.Object_List(TestSupport.Auth(), "b", "", -1, "", "", out _, out _, out _));
     }
 
+    [Fact]
+    public void UpdateMetadata_with_nothing_to_change_is_rejected()
+    {
+        var ex = Assert.Throws<ArgumentException>(() =>
+            _sut.Object_UpdateMetadata(TestSupport.Auth(), "b", "o", "", "", "", "", []));
+        Assert.Contains("Nothing to update", ex.Message);
+    }
+
+    [Fact]
+    public void DeleteByPrefix_rejects_an_empty_prefix()
+    {
+        var ex = Assert.Throws<ArgumentException>(() =>
+            _sut.Object_DeleteByPrefix(TestSupport.Auth(), "b", "", out _));
+        Assert.Contains("Prefix cannot be empty", ex.Message);
+    }
+
+    [Fact]
+    public void DeleteByPrefix_rejects_a_whitespace_prefix()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            _sut.Object_DeleteByPrefix(TestSupport.Auth(), "b", "   ", out _));
+    }
+
     // ---- caching -----------------------------------------------------------------------
     // The clients/signers are private statics; exercise the same cache the actions use via
     // the internal factory methods.
