@@ -1,0 +1,86 @@
+name: NuGet update watch
+
+# Opens (or refreshes) a single GitHub issue when any Google.* NuGet package the
+# connector references has a newer stable release, so the SDK never silently ages.
+#
+# Every Google.* <PackageReference> in the csproj is checked. That deliberately
+# includes the transitive dependencies we pin explicitly (Google.Apis.Storage.v1,
+# Google.Api.Gax.Rest): without those pins NuGet resolves them to
+# Google.Cloud.Storage.V1's older minimums, so they must be watched too.
+#
+# Not watched on purpose:
+#   OutSystems.ExternalLibraries.SDK  - bumped deliberately when ODC's supported
+#                                       SDK/runtime changes, not on NuGet cadence.
+#   System.* / Microsoft.*            - satisfied by the SDK's own constraints.
+
+on:
+  schedule:
+    - cron: '0 9 1 * *'   # monthly, 1st at 09:00 UTC
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare every Google.* PackageReference with the latest on NuGet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          CSPROJ=GoogleCloudStorage.csproj
+          OUTDATED=""
+
+          # "Name|Version" for every Google.* PackageReference in the csproj.
+          while IFS='|' read -r NAME CURRENT; do
+            [ -z "$NAME" ] && continue
+            PKG=$(echo "$NAME" | tr '[:upper:]' '[:lower:]')
+            LATEST=$(curl -sf "https://api.nuget.org/v3-flatcontainer/$PKG/index.json" \
+              | jq -r '.versions[] | select(test("-") | not)' | sort -V | tail -1) || {
+                echo "::warning::could not query NuGet for $NAME"; continue; }
+            [ -z "$LATEST" ] && { echo "::warning::no stable version found for $NAME"; continue; }
+
+            if [ "$LATEST" = "$CURRENT" ]; then
+              echo "OK        $NAME $CURRENT"
+              continue
+            fi
+            # If CURRENT sorts at or above LATEST, we're already current (or ahead).
+            if [ "$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -1)" = "$CURRENT" ]; then
+              echo "OK        $NAME $CURRENT (>= published $LATEST)"
+              continue
+            fi
+            echo "OUTDATED  $NAME $CURRENT -> $LATEST"
+            OUTDATED="${OUTDATED}- \`$NAME\`: **$CURRENT** -> **$LATEST**"$'\n'
+          done < <(grep -oP '<PackageReference Include="\KGoogle[^"]*" Version="[0-9.]+' "$CSPROJ" \
+                   | sed 's/" Version="/|/')
+
+          if [ -z "$OUTDATED" ]; then
+            echo "All Google packages are up to date."
+            exit 0
+          fi
+
+          TITLE="Update Google Cloud Storage SDK packages"
+          BODY="Newer stable releases are available for Google.* packages referenced in \`GoogleCloudStorage.csproj\`:
+
+          $OUTDATED
+          Update steps:
+          1. Bump the matching \`<PackageReference ... Version=\"...\" />\` in \`GoogleCloudStorage.csproj\`.
+          2. \`dotnet build GoogleCloudStorage.csproj -c Release\` and \`dotnet test\` - all checks must pass.
+          3. Open a PR (CI runs the suite) and merge once green.
+          4. Publish, zip the \`publish/\` output (excluding \`OutSystems.ExternalLibraries.SDK.dll\`), and cut a release for the ODC Portal.
+
+          Release notes: https://github.com/googleapis/google-cloud-dotnet/releases"
+
+          # One open issue at a time; refresh its body if the set changed.
+          EXISTING=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --body "$BODY"
+            echo "Updated existing issue #$EXISTING"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi
