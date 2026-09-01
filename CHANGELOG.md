@@ -4,6 +4,18 @@ All notable changes to the **Google Cloud Storage Connector for ODC** are docume
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-09-01
+
+Maintenance release. No changes to actions, inputs, or outputs — a drop-in replacement for 1.5.0.
+
+### Changed
+
+- **Refreshed the Google client libraries.** `Google.Apis` / `Google.Apis.Auth` / `Google.Apis.Core` `1.75.0` → **`1.76.0`**, `Google.Apis.Storage.v1` → **`1.76.0.4250`**, and `Google.Api.Gax` / `Google.Api.Gax.Rest` → **`4.15.0`**. `Google.Cloud.Storage.V1` remains at `4.15.0`. The `Google.Api.Gax.*` and `Google.Apis.Storage.v1` transitive dependencies are now pinned explicitly, so the published package no longer ships them at `Google.Cloud.Storage.V1`'s older minimums.
+
+### Compatibility
+
+- No breaking changes and no signature changes — consuming apps do **not** need to refresh the connector reference for this release.
+
 ## [1.5.0] - 2026-07-18
 
 Custom object metadata, in-place metadata editing, and folder deletion.
@@ -47,5 +59,6 @@ New object-listing, folder-navigation, and signed-URL capabilities, plus more ac
 
 - **`Object_List` signature changed.** It gained required inputs (`MaxResults`, `PageToken`, `Delimiter`) and outputs (`NextPageToken`, `PrefixList`). Apps that consume `Object_List` in Service Studio must remap the action after upgrading. All other changes are backward-compatible — the new `ContentType` on `Object_GetSignedUrl` is optional.
 
+[1.5.2]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.5.2
 [1.5.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.5.0
 [1.4.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.4.0

@@ -13,7 +13,14 @@
   <ItemGroup>
     <PackageReference Include="OutSystems.ExternalLibraries.SDK" Version="1.5.0" />
     <PackageReference Include="Google.Cloud.Storage.V1" Version="4.15.0" />
-    <PackageReference Include="Google.Apis.Auth" Version="1.75.0" />
+    <PackageReference Include="Google.Apis.Auth" Version="1.76.0" />
+    <!--
+      Pin the transitive Google.* dependencies of Google.Cloud.Storage.V1 to their current
+      releases. Without these, NuGet resolves them to Cloud.Storage.V1's minimums (Gax 4.13.1,
+      Storage.v1 1.74.x), leaving the published package two versions behind on those assemblies.
+    -->
+    <PackageReference Include="Google.Apis.Storage.v1" Version="1.76.0.4250" />
+    <PackageReference Include="Google.Api.Gax.Rest" Version="4.15.0" />
   </ItemGroup>
 
   <ItemGroup>
