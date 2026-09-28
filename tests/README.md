@@ -41,4 +41,10 @@ Prerequisites: the .NET 10 SDK, and `tar` on `PATH` (bundled with macOS, Linux, 
 | `Object_Copy` / `Object_Move` / `Object_Delete` | Cross-bucket copy/move semantics, source retention/removal |
 | `Object_GetSignedUrl` | V4 URL structure, operation case-insensitivity, `ContentType`-in-signature, expiration bounds (0, > 7 days, exactly 7 days), JSON-escaped key |
 | Error handling | Missing object/bucket errors, garbage private key → friendly parse error, negative `MaxResults` |
-| Caching | `StorageClient`/`UrlSigner` instance reuse, per-credential isolation |
+| Caching | `StorageClient`/`UrlSigner` instance reuse, per-credential isolation, key and federation never sharing a client |
+| Custom metadata | Upload round-trip, `Object_UpdateMetadata` add/overwrite/remove with content integrity, `Object_DeleteByPrefix` counts and guards |
+| Auth method switch | Empty/explicit/case-insensitive `ServiceAccountKey`, invalid method, missing-field messages for both methods, provider formats, https-only token endpoint |
+| Federation protocol (contract) | Client-credentials request, RFC 8693 STS exchange, service account impersonation, Storage called with the short-lived token, supplied `SubjectToken`, `client_secret_basic` fallback, and friendly errors for a rejected client, a non-JWT token, an STS rejection, or a missing Token Creator role |
+| Federation live (CI only) | Real Google Cloud via GitHub OIDC: the federated identity is accepted by Storage, and the signed URL's signature verifies against the service account's published certificate (the verifier itself is proven offline) |
+
+The **live** tests run only in GitHub Actions (job `live-federation`, with `id-token: write` and the `GCP_WIF_PROVIDER`, `GCP_SERVICE_ACCOUNT`, `GCP_PROJECT_ID` repository variables). Everywhere else they skip. They use no secrets: GitHub's OIDC token is the identity provider.

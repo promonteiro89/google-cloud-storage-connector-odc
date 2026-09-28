@@ -31,6 +31,7 @@ GoogleCloudStorage_ODC/
 ├── GoogleCloudStorage.csproj   # Project definition
 ├── IGoogleCloudStorage.cs      # ODC External Logic Interface
 ├── GoogleCloudStorage.cs       # Implementation logic (Adapter)
+├── GoogleCloudStorage.Auth.cs  # Authentication: Workload Identity Federation + service account key
 ├── Resources/                  # Embedded branded icons
 └── Structures/                 # Strongly-typed ODC structures
 ```
@@ -38,7 +39,8 @@ GoogleCloudStorage_ODC/
 The connector is architected as an **adapter**. It bridges the OutSystems Developer Cloud runtime with the official Google Cloud Storage .NET SDK using the **Bridge Pattern**. This ensures that the OutSystems application logic remains decoupled from the low-level SDK implementation details.
 
 ### Key Architectural Decisions:
-- **Cached, thread-safe clients:** `StorageClient` and `UrlSigner` instances are cached per service account (keyed by a SHA-256 hash of the credentials, never the raw key) and reused across requests. This avoids re-parsing the RSA private key and allocating a new `HttpClient` on every call — both types are thread-safe, so sharing them is safe under high concurrency and prevents socket exhaustion.
+- **Keyless authentication:** Workload Identity Federation (Google's recommended method for workloads outside Google Cloud) works with any OIDC identity provider, server-to-server. Service account keys remain supported as a legacy fallback. See [Authentication](#authentication).
+- **Cached, thread-safe clients:** `StorageClient` and `UrlSigner` instances are cached per credential (keyed by a SHA-256 hash, never the raw secret; the two methods never share an entry) and reused across requests. This avoids re-parsing the RSA private key and allocating a new `HttpClient` on every call — both types are thread-safe, so sharing them is safe under high concurrency and prevents socket exhaustion.
 - **Actionable errors:** Google API failures are translated into clear, actionable messages (missing bucket vs. object, access denied, unauthenticated, bucket-not-empty, credential mismatch), with the original exception preserved as the inner exception for diagnostics.
 - **V4 Signed URLs:** Offloads large file data transfers directly to the client browser, bypassing the ODC server to optimize memory and bandwidth.
 - **Resource Embedding:** Branded icons are embedded directly into the assembly to provide a premium integrated experience in Service Studio.
@@ -53,7 +55,7 @@ The connector is architected as an **adapter**. It bridges the OutSystems Develo
 - A Service Account with the following IAM roles:
   - `Storage Object Admin` (full object control)
   - `Storage Admin` (required for bucket management)
-  - `Service Account Token Creator` (mandatory for **Signed URLs**)
+- With **Workload Identity Federation**: grant the federated identity `Workload Identity User` on the service account, plus `Service Account Token Creator` for **Signed URLs** (signing goes through the IAM `signBlob` API). With a **service account key**, signed URLs are signed locally and need no extra role.
 
 ---
 
@@ -73,13 +75,84 @@ After publishing, zip the contents of the `publish/` folder (**excluding** `OutS
 
 ## Authentication
 
-Authentication is handled via the `Authentication` structure. Credentials should be stored securely in **ODC App Settings (Site Properties)** and passed to each action at runtime.
+Every action takes an `Authentication` structure. Two methods are supported, selected with `AuthenticationMethod`:
 
-| Parameter | Source in GCP JSON | Description |
-|-----------|-------------------|-------------|
-| `ProjectId` | `project_id` | Your Google Cloud Project ID |
-| `ClientEmail` | `client_email` | Service Account identification email |
-| `PrivateKey` | `private_key` | Full RSA Private Key (with BEGIN/END headers) |
+| Method | Google's guidance | Google credential stored | Signed URLs |
+|---|---|---|---|
+| **`WorkloadIdentityFederation`** | **Recommended** for workloads outside Google Cloud | **None**, only short-lived tokens | Signed by the service account through the IAM `signBlob` API |
+| **`ServiceAccountKey`** *(default when empty)* | Last resort | A long-lived private key | Signed locally with the key |
+
+Existing apps keep working unchanged: an empty `AuthenticationMethod` means `ServiceAccountKey`. Because the method is just a value, you can drive it from a setting and migrate one environment at a time. Store every credential value in **ODC App Settings**, marking secrets as **Secret**.
+
+### Workload Identity Federation (recommended, keyless)
+
+The connector never holds a Google key. On each token refresh (roughly hourly) it:
+
+1. obtains a JWT from **your identity provider** using the standard OAuth 2.0 **client-credentials** grant. This is server-to-server with no user interaction, so it works in server actions and timers. Alternatively, you pass a JWT you already have in `SubjectToken`;
+2. exchanges it with **Google's Security Token Service** for a federated token;
+3. **impersonates your service account** for a short-lived access token, which Storage calls use.
+
+Any OIDC identity provider that issues **signed JWTs (RS256/ES256)** works: Microsoft Entra ID, Okta, Auth0, Keycloak, Ping, ADFS, and others.
+
+| Field | Description |
+|---|---|
+| `AuthenticationMethod` | `WorkloadIdentityFederation` |
+| `ProjectId` | Your Google Cloud project ID (used by `Bucket_List` / `Bucket_Create`) |
+| `WorkloadIdentityProvider` | `//iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER` |
+| `ServiceAccountEmail` | The service account the connector acts as |
+| `TokenEndpoint` | Your identity provider's OAuth 2.0 token endpoint (**https**) |
+| `ClientId` / `ClientSecret` | Your app registration at the identity provider (store the secret as **Secret**) |
+| `Scope` | Optional `scope` for the token request |
+| `Audience` | Optional `audience` for the token request (some providers require it) |
+| `SubjectToken` | Optional: a JWT you obtained yourself. When set, `TokenEndpoint`/`ClientId`/`ClientSecret` are not needed |
+
+Client authentication uses `client_secret_post`. If the provider rejects the client (`invalid_client`), the connector retries once with HTTP Basic (`client_secret_basic`) and remembers which method worked.
+
+**Provider examples** (confirm your tokens' `iss` and `aud` claims by decoding one, e.g. at [jwt.ms](https://jwt.ms)):
+
+| Provider | `TokenEndpoint` | `Scope` / `Audience` | Notes |
+|---|---|---|---|
+| Microsoft Entra ID | `https://login.microsoftonline.com/TENANT_ID/oauth2/v2.0/token` | `Scope` = `api://YOUR_APP_ID_URI/.default` | Request a token for **your own app registration**, not Microsoft Graph. The issuer is `https://sts.windows.net/TENANT_ID/` for v1 tokens (the default) or `https://login.microsoftonline.com/TENANT_ID/v2.0` for v2. |
+| Okta | `https://YOUR_ORG.okta.com/oauth2/AUTH_SERVER_ID/v1/token` | `Scope` = your custom scope | Needs a **custom authorization server** (the org server doesn't issue client-credentials tokens with custom scopes). |
+| Auth0 | `https://YOUR_TENANT.auth0.com/oauth/token` | `Audience` = your API identifier | Machine-to-machine application. |
+| Keycloak | `https://HOST/realms/REALM/protocol/openid-connect/token` | — | Enable **Service accounts** on the client. |
+
+**Google Cloud setup (one-time).** The federation pieces cost nothing: IAM, STS and IAM Credentials are free.
+
+```bash
+PROJECT_ID=my-project
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+SA=gcs-connector@$PROJECT_ID.iam.gserviceaccount.com
+
+gcloud services enable iam.googleapis.com iamcredentials.googleapis.com sts.googleapis.com --project=$PROJECT_ID
+gcloud iam service-accounts create gcs-connector --project=$PROJECT_ID
+
+# Pool + OIDC provider. ISSUER and AUDIENCE are the 'iss' and 'aud' claims of your provider's tokens;
+# APP_SUBJECT is their 'sub' claim (for Entra ID client credentials: the service principal's object ID).
+gcloud iam workload-identity-pools create odc-apps --location=global --project=$PROJECT_ID
+gcloud iam workload-identity-pools providers create-oidc my-idp \
+  --location=global --workload-identity-pool=odc-apps --project=$PROJECT_ID \
+  --issuer-uri="ISSUER" --allowed-audiences="AUDIENCE" \
+  --attribute-mapping="google.subject=assertion.sub" \
+  --attribute-condition="assertion.sub == 'APP_SUBJECT'"
+
+# Let that identity act as the service account (+ sign URLs), and give the service account bucket access.
+MEMBER="principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/odc-apps/subject/APP_SUBJECT"
+gcloud iam service-accounts add-iam-policy-binding $SA --role=roles/iam.workloadIdentityUser --member="$MEMBER" --project=$PROJECT_ID
+gcloud iam service-accounts add-iam-policy-binding $SA --role=roles/iam.serviceAccountTokenCreator --member="$MEMBER" --project=$PROJECT_ID
+gcloud storage buckets add-iam-policy-binding gs://MY_BUCKET --role=roles/storage.objectAdmin --member="serviceAccount:$SA"
+```
+
+Then set `WorkloadIdentityProvider` to `//iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/odc-apps/providers/my-idp` and `ServiceAccountEmail` to `$SA`. If your identity provider isn't reachable from the internet, upload its public keys (JWKS) to the provider instead of relying on its discovery URL. The connector itself must still be able to reach the provider's token endpoint.
+
+### Service Account Key (legacy)
+
+| Field | Source in the service account JSON key | Description |
+|---|---|---|
+| `AuthenticationMethod` | — | Empty or `ServiceAccountKey` |
+| `ProjectId` | `project_id` | Your Google Cloud project ID |
+| `ClientEmail` | `client_email` | Service account email |
+| `PrivateKey` | `private_key` | Full RSA private key (with BEGIN/END headers) |
 
 ---
 
@@ -313,10 +386,11 @@ Checks whether a bucket exists and is accessible to the service account, without
 ## Data Structures
 
 ### `Authentication`
-Encapsulates Google Cloud Service Account credentials.
-- `ProjectId`: Text
-- `ClientEmail`: Text
-- `PrivateKey`: Text
+Google Cloud credentials for either method (see [Authentication](#authentication)).
+- `ProjectId`: Text (mandatory)
+- `AuthenticationMethod`: Text: `WorkloadIdentityFederation` or `ServiceAccountKey` (empty = `ServiceAccountKey`)
+- `ClientEmail`, `PrivateKey`: Text (ServiceAccountKey only)
+- `WorkloadIdentityProvider`, `ServiceAccountEmail`, `TokenEndpoint`, `ClientId`, `ClientSecret`, `Scope`, `Audience`, `SubjectToken`: Text (WorkloadIdentityFederation only)
 
 ### `File`
 Used for binary data exchange.
@@ -409,6 +483,8 @@ dotnet test --filter "FullyQualifiedName~OfflineTests"   # offline only, no netw
 
 - **Offline tests** (signed URLs, validation, caching) use a throwaway in-memory RSA key — V4 signing is local cryptography.
 - **Integration tests** run the connector against [fake-gcs-server](https://github.com/fsouza/fake-gcs-server) via the `GCSCONNECTOR_EMULATOR_HOST` hook. This variable is honored **only for local testing** and is never set on a real ODC server, where the connector always talks to production GCS. The test fixture starts the emulator automatically and skips (rather than fails) if it can't. See [`tests/README.md`](tests/README.md) for details.
+- **Federation contract tests** drive the full Workload Identity Federation chain (identity provider → Google STS → impersonation → Storage / `signBlob`) against an in-process fake, asserting the exact requests on every hop.
+- **Live federation tests** (CI only) run keyless against **real Google Cloud**. GitHub Actions' own OIDC token acts as the identity provider, so no secrets exist anywhere. They verify Google accepts the federated identity and that signed URLs verify against the service account's published certificate.
 
 ---
 
