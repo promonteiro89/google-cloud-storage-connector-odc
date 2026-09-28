@@ -4,6 +4,30 @@ All notable changes to the **Google Cloud Storage Connector for ODC** are docume
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-09-28
+
+Keyless authentication with Workload Identity Federation, alongside the existing service account key.
+
+### Added
+
+- **Workload Identity Federation** (Google's recommended method for workloads outside Google Cloud). Set `AuthenticationMethod` to `WorkloadIdentityFederation` and no Google key exists anywhere: the connector obtains a JWT from **any OIDC identity provider** (Entra ID, Okta, Auth0, Keycloak, …), exchanges it with Google's Security Token Service, and impersonates a service account for a short-lived access token.
+  - **Server-side, no user interaction:** tokens come from the standard OAuth 2.0 **client-credentials** grant (`TokenEndpoint`, `ClientId`, `ClientSecret`, optional `Scope` / `Audience`). It uses `client_secret_post`, with an automatic fallback to `client_secret_basic`.
+  - **Bring your own token:** alternatively, pass a JWT in `SubjectToken`.
+  - **Signed URLs** are signed by the service account through the IAM Credentials `signBlob` API.
+  - Tokens are cached and refreshed automatically before they expire.
+- New `Authentication` fields: `AuthenticationMethod`, `WorkloadIdentityProvider`, `ServiceAccountEmail`, `TokenEndpoint`, `ClientId`, `ClientSecret`, `Scope`, `Audience`, `SubjectToken`.
+- Actionable errors for the new failure modes: missing fields, a malformed provider, the identity provider rejecting the client, a non-JWT token, Google rejecting the token exchange (issuer/audience/attribute condition), and a missing Token Creator role for signing.
+- Tests: validation and federation protocol contract tests (a fake identity provider, STS, IAM Credentials and Storage; every hop asserted), plus a **live** CI job that runs keyless against real Google Cloud using GitHub's OIDC token, with no secrets.
+
+### Changed
+
+- `Authentication.ClientEmail` and `PrivateKey` are no longer mandatory (federation doesn't use them). An empty `AuthenticationMethod` still means `ServiceAccountKey`, so **existing apps behave exactly as before**.
+- The unauthenticated / access-denied messages now name the identity actually in use and give hints for whichever method is configured.
+
+### Compatibility
+
+- Non-breaking: no action signatures changed. Consumers refresh the connector reference to see the new `Authentication` fields.
+
 ## [1.5.2] - 2026-09-01
 
 Maintenance release. No changes to actions, inputs, or outputs — a drop-in replacement for 1.5.0.
@@ -59,6 +83,7 @@ New object-listing, folder-navigation, and signed-URL capabilities, plus more ac
 
 - **`Object_List` signature changed.** It gained required inputs (`MaxResults`, `PageToken`, `Delimiter`) and outputs (`NextPageToken`, `PrefixList`). Apps that consume `Object_List` in Service Studio must remap the action after upgrading. All other changes are backward-compatible — the new `ContentType` on `Object_GetSignedUrl` is optional.
 
+[1.6.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.6.0
 [1.5.2]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.5.2
 [1.5.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.5.0
 [1.4.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.4.0

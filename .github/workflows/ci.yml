@@ -35,5 +35,37 @@ jobs:
       - name: Build connector (Release, .NET 10)
         run: dotnet build GoogleCloudStorage.csproj -c Release
 
-      - name: Run test suite (offline + emulator integration)
-        run: dotnet test tests/GoogleCloudStorage.Tests/GoogleCloudStorage.Tests.csproj -c Debug --logger "console;verbosity=normal"
+      - name: Run test suite (offline + emulator integration + federation contract)
+        run: dotnet test tests/GoogleCloudStorage.Tests/GoogleCloudStorage.Tests.csproj -c Debug --filter "Category!=Live" --logger "console;verbosity=normal"
+
+  live-federation:
+    # Keyless, against REAL Google Cloud: this workflow's GitHub OIDC token is exchanged through
+    # Workload Identity Federation for the sandbox service account. No secrets are involved; the
+    # GCP_* values are plain repository variables. Fork PRs get neither an id-token nor the
+    # variables, so the job only runs for pushes and same-repo PRs.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+      GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Check live configuration
+        run: |
+          # Fail loudly instead of letting the live tests silently skip.
+          for v in GCP_WIF_PROVIDER GCP_SERVICE_ACCOUNT ACTIONS_ID_TOKEN_REQUEST_URL; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set (repository variable or id-token permission missing)"; exit 1; fi
+          done
+
+      - name: Live Workload Identity Federation tests (real Google Cloud)
+        run: dotnet test tests/GoogleCloudStorage.Tests/GoogleCloudStorage.Tests.csproj -c Debug --filter "Category=Live" --logger "console;verbosity=normal"

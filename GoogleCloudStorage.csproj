@@ -24,6 +24,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Lets the test project drive the internal HTTP seam used for the federation contract tests. -->
+    <InternalsVisibleTo Include="GoogleCloudStorage.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="Resources\app_icon.png" />
     <EmbeddedResource Include="Resources\action_icon.png" />
   </ItemGroup>
