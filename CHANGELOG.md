@@ -4,6 +4,25 @@ All notable changes to the **Google Cloud Storage Connector for ODC** are docume
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-10-09
+
+Maintenance release: end-to-end upload integrity. No changes to actions, inputs, or outputs; a drop-in replacement for 1.6.0.
+
+### Changed
+
+- **`Google.Cloud.Storage.V1` `4.15.0` → `5.0.0`.** Uploads now send the CRC32C checksum of the exact bytes with the request, and Google rejects any mismatch **before** storing the object. Previously the check ran after the upload: a corrupted object was briefly stored and then deleted, which could also lose the previous version when overwriting. Now a failed check never touches existing data.
+- **Refreshed the other Google client libraries:** `Google.Apis` / `Google.Apis.Auth` / `Google.Apis.Core` `1.76.0` → **`1.77.0`**, `Google.Apis.Storage.v1` `1.76.0.4250` → **`1.77.0.4290`**, and `Google.Api.Gax` / `Google.Api.Gax.Rest` `4.15.0` → **`4.15.1`**.
+
+### Added
+
+- A clear error when Google rejects an upload for a checksum mismatch: it says nothing was stored, any existing object is unchanged, and the upload can be retried.
+- Upload integrity tests: the checksum sent matches an independent CRC32C of the content, and corrupted data is rejected with the friendly error.
+
+### Documentation
+
+- Signed URL `Upload`s go directly from the client to Google, so the automatic checksum applies only to `Object_Upload`; the README points to Google's data validation guide for direct uploads.
+- Corrected the large-file guidance to ODC's 5.5 MB custom code payload limit.
+
 ## [1.6.0] - 2026-09-28
 
 Keyless authentication with Workload Identity Federation, alongside the existing service account key.

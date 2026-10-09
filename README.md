@@ -42,6 +42,7 @@ The connector is architected as an **adapter**. It bridges the OutSystems Develo
 - **Keyless authentication:** Workload Identity Federation (Google's recommended method for workloads outside Google Cloud) works with any OIDC identity provider, server-to-server. Service account keys remain supported as a legacy fallback. See [Authentication](#authentication).
 - **Cached, thread-safe clients:** `StorageClient` and `UrlSigner` instances are cached per credential (keyed by a SHA-256 hash, never the raw secret; the two methods never share an entry) and reused across requests. This avoids re-parsing the RSA private key and allocating a new `HttpClient` on every call — both types are thread-safe, so sharing them is safe under high concurrency and prevents socket exhaustion.
 - **Actionable errors:** Google API failures are translated into clear, actionable messages (missing bucket vs. object, access denied, unauthenticated, bucket-not-empty, credential mismatch), with the original exception preserved as the inner exception for diagnostics.
+- **End-to-end upload integrity:** `Object_Upload` sends the CRC32C checksum of the exact bytes with the upload (Google.Cloud.Storage.V1 5.x). If anything changes the data in transit, Google rejects the upload before storing it, so a corrupted object is never created and an existing object is never overwritten with bad data.
 - **V4 Signed URLs:** Offloads large file data transfers directly to the client browser, bypassing the ODC server to optimize memory and bandwidth.
 - **Resource Embedding:** Branded icons are embedded directly into the assembly to provide a premium integrated experience in Service Studio.
 
@@ -171,6 +172,8 @@ Persists a file to a specific GCS bucket, optionally with custom metadata.
 | `objectName` | `Text` | Full path/filename in the bucket |
 | `file` | `File` | Structure containing Binary Content and ContentType |
 | `metadata` | `List of MetadataEntry` | Optional custom key-value metadata to store with the object (e.g. tenant, document type). Retrievable via `Object_GetMetadata`. Leave empty for none. |
+
+> **Integrity check:** the upload carries a CRC32C checksum of `file.Content`. If the data Google receives doesn't match, the upload fails with an "Upload rejected by Google Cloud Storage … retry the upload" error, nothing is stored, and any existing object with that name is left unchanged.
 
 #### `Object_Download`
 Retrieves a file and its metadata from GCS.
@@ -330,6 +333,8 @@ Generates a time-limited V4 signed URL for secure, direct-to-browser file access
 > **Multi-upload:** signed URLs are bound to a specific object path, so request one `Upload` URL per file (pass each file's `objectName`).
 >
 > **Content-Type binding:** if you pass `contentType`, the client's PUT must send exactly that `Content-Type` header, or Google rejects the upload with a signature mismatch. Leave it empty to accept any content type.
+>
+> **Checksums:** an `Upload` URL is used by the client directly, without the connector, so `Object_Upload`'s automatic CRC32C check doesn't apply to it. If you need end-to-end validation for direct uploads, follow Google's [data validation guide](https://cloud.google.com/storage/docs/data-validation) in the client.
 
 ---
 
@@ -483,6 +488,7 @@ dotnet test --filter "FullyQualifiedName~OfflineTests"   # offline only, no netw
 
 - **Offline tests** (signed URLs, validation, caching) use a throwaway in-memory RSA key — V4 signing is local cryptography.
 - **Integration tests** run the connector against [fake-gcs-server](https://github.com/fsouza/fake-gcs-server) via the `GCSCONNECTOR_EMULATOR_HOST` hook. This variable is honored **only for local testing** and is never set on a real ODC server, where the connector always talks to production GCS. The test fixture starts the emulator automatically and skips (rather than fails) if it can't. See [`tests/README.md`](tests/README.md) for details.
+- **Upload integrity tests** check that uploads carry the CRC32C of the exact bytes and that data corrupted in transit is rejected with a clear error, against an in-process fake of Google's resumable-upload endpoint.
 - **Federation contract tests** drive the full Workload Identity Federation chain (identity provider → Google STS → impersonation → Storage / `signBlob`) against an in-process fake, asserting the exact requests on every hop.
 - **Live federation tests** (CI only) run keyless against **real Google Cloud**. GitHub Actions' own OIDC token acts as the identity provider, so no secrets exist anywhere. They verify Google accepts the federated identity and that signed URLs verify against the service account's published certificate.
 
@@ -491,7 +497,7 @@ dotnet test --filter "FullyQualifiedName~OfflineTests"   # offline only, no netw
 ## Best Practices
 
 - **Security:** Mark `PrivateKey` as a **Secret** App Setting in ODC to ensure it is encrypted and masked in logs.
-- **Efficiency:** For files larger than 100MB, always use `Object_GetSignedUrl` to avoid server-side memory pressure.
+- **Large files:** ODC caps custom code input and output at 5.5 MB, so for files over ~5 MB use `Object_GetSignedUrl` and let the client transfer the file directly with Google.
 - **Naming:** Follow GCS bucket naming constraints (3-63 characters, lowercase letters, numbers, and hyphens).
 - **Tag your objects:** Use the `metadata` input on `Object_Upload` (or `Object_UpdateMetadata` later) to attach business context — tenant, owner, document type — that you can read back cheaply with `Object_GetMetadata` without downloading the file.
 - **Edit metadata in place:** Use `Object_UpdateMetadata` to fix a `ContentType` or relabel objects without re-uploading their content; it is metageneration-guarded so concurrent edits fail cleanly.

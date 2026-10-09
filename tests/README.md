@@ -43,6 +43,7 @@ Prerequisites: the .NET 10 SDK, and `tar` on `PATH` (bundled with macOS, Linux, 
 | Error handling | Missing object/bucket errors, garbage private key → friendly parse error, negative `MaxResults` |
 | Caching | `StorageClient`/`UrlSigner` instance reuse, per-credential isolation, key and federation never sharing a client |
 | Custom metadata | Upload round-trip, `Object_UpdateMetadata` add/overwrite/remove with content integrity, `Object_DeleteByPrefix` counts and guards |
+| Upload integrity | Uploads send `x-goog-hash: crc32c=…` matching an independent CRC32C of the exact bytes (reference value checked against RFC 3720), the bytes are stored unchanged, and data corrupted in transit is rejected with a friendly "nothing was stored, retry" error |
 | Auth method switch | Empty/explicit/case-insensitive `ServiceAccountKey`, invalid method, missing-field messages for both methods, provider formats, https-only token endpoint |
 | Federation protocol (contract) | Client-credentials request, RFC 8693 STS exchange, service account impersonation, Storage called with the short-lived token, supplied `SubjectToken`, `client_secret_basic` fallback, and friendly errors for a rejected client, a non-JWT token, an STS rejection, or a missing Token Creator role |
 | Federation live (CI only) | Real Google Cloud via GitHub OIDC: the federated identity is accepted by Storage, and the signed URL's signature verifies against the service account's published certificate (the verifier itself is proven offline) |
