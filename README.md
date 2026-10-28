@@ -40,8 +40,9 @@ The connector is architected as an **adapter**. It bridges the OutSystems Develo
 
 ### Key Architectural Decisions:
 - **Keyless authentication:** Workload Identity Federation (Google's recommended method for workloads outside Google Cloud) works with any OIDC identity provider, server-to-server. Service account keys remain supported as a legacy fallback. See [Authentication](#authentication).
-- **Cached, thread-safe clients:** `StorageClient` and `UrlSigner` instances are cached per credential (keyed by a SHA-256 hash, never the raw secret; the two methods never share an entry) and reused across requests. This avoids re-parsing the RSA private key and allocating a new `HttpClient` on every call — both types are thread-safe, so sharing them is safe under high concurrency and prevents socket exhaustion.
-- **Actionable errors:** Google API failures are translated into clear, actionable messages (missing bucket vs. object, access denied, unauthenticated, bucket-not-empty, credential mismatch), with the original exception preserved as the inner exception for diagnostics.
+- **Cached, thread-safe clients:** `StorageClient` and `UrlSigner` instances are cached per credential (keyed by a SHA-256 hash of every credential field, never the raw secret; the two methods never share an entry, and each supplied `SubjectToken` gets its own entry) and reused across requests. This avoids re-parsing the RSA private key and allocating a new `HttpClient` on every call — both types are thread-safe, so sharing them is safe under high concurrency and prevents socket exhaustion. The caches are bounded (500 entries each, least recently used first) and an entry expires after 60 minutes without use, or when the supplied token it was built from expires.
+- **Actionable errors:** every action translates failures into clear, actionable messages: missing bucket vs. object, access denied, unauthenticated, bucket-not-empty, credential mismatch, identity provider errors, network failures and timeouts. The original exception is preserved as the inner exception for diagnostics. Messages never contain secrets, token endpoint credentials or query strings, or raw identity provider responses.
+- **Within ODC's platform limits:** every request to Google times out after 80 seconds (below ODC's 95-second action limit), `Object_Download` refuses objects over ODC's 5.5 MB payload limit, and `Object_DeleteByPrefix` stops after 75 seconds and reports its progress, so the connector's own message reaches the app instead of a platform timeout.
 - **End-to-end upload integrity:** `Object_Upload` sends the CRC32C checksum of the exact bytes with the upload (Google.Cloud.Storage.V1 5.x). If anything changes the data in transit, Google rejects the upload before storing it, so a corrupted object is never created and an existing object is never overwritten with bad data.
 - **V4 Signed URLs:** Offloads large file data transfers directly to the client browser, bypassing the ODC server to optimize memory and bandwidth.
 - **Resource Embedding:** Branded icons are embedded directly into the assembly to provide a premium integrated experience in Service Studio.
@@ -70,7 +71,7 @@ dotnet build GoogleCloudStorage.csproj -c Release
 dotnet publish GoogleCloudStorage.csproj -c Release -f net10.0 --no-self-contained
 ```
 
-After publishing, zip the contents of the `publish/` folder (**excluding** `OutSystems.ExternalLibraries.SDK.dll`) and upload it to the ODC Portal.
+After publishing, zip the contents of `bin/Release/net10.0/publish/` (**excluding** `OutSystems.ExternalLibraries.SDK.dll` and the `.pdb`), keeping its `runtimes/` folder, and upload the zip to the ODC Portal. See [Build and Deployment](#build-and-deployment).
 
 ---
 
@@ -101,11 +102,11 @@ Any OIDC identity provider that issues **signed JWTs (RS256/ES256)** works: Micr
 | `ProjectId` | Your Google Cloud project ID (used by `Bucket_List` / `Bucket_Create`) |
 | `WorkloadIdentityProvider` | `//iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER` |
 | `ServiceAccountEmail` | The service account the connector acts as |
-| `TokenEndpoint` | Your identity provider's OAuth 2.0 token endpoint (**https**) |
+| `TokenEndpoint` | Your identity provider's OAuth 2.0 token endpoint (**https**). Use the final URL: redirects are not followed, and a URL with user information (`user:password@`) is rejected. Private and on-premises hosts (Keycloak, ADFS) are fine. |
 | `ClientId` / `ClientSecret` | Your app registration at the identity provider (store the secret as **Secret**) |
 | `Scope` | Optional `scope` for the token request |
 | `Audience` | Optional `audience` for the token request (some providers require it) |
-| `SubjectToken` | Optional: a JWT you obtained yourself. When set, `TokenEndpoint`/`ClientId`/`ClientSecret` are not needed |
+| `SubjectToken` | Optional: a JWT you obtained yourself. When set, `TokenEndpoint`/`ClientId`/`ClientSecret` are not needed. A token whose `exp` has passed is rejected before calling Google. Each distinct token is exchanged and cached on its own, until its `exp` (or 5 minutes when it has none). |
 
 Client authentication uses `client_secret_post`. If the provider rejects the client (`invalid_client`), the connector retries once with HTTP Basic (`client_secret_basic`) and remembers which method worked.
 
@@ -176,7 +177,7 @@ Persists a file to a specific GCS bucket, optionally with custom metadata.
 > **Integrity check:** the upload carries a CRC32C checksum of `file.Content`. If the data Google receives doesn't match, the upload fails with an "Upload rejected by Google Cloud Storage … retry the upload" error, nothing is stored, and any existing object with that name is left unchanged.
 
 #### `Object_Download`
-Retrieves a file and its metadata from GCS.
+Retrieves a file and its metadata from GCS. Objects larger than **5.5 MB** (ODC's payload limit for an action) are refused with an error pointing to `Object_GetSignedUrl`; download those directly from Google with a signed URL.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -267,7 +268,7 @@ Copies an object to another location, within the same bucket or across buckets, 
 | `destinationObjectName` | `Text` | Full path/filename for the destination |
 
 #### `Object_Move`
-Moves an object to another location (copy + delete of the source), within the same bucket or across buckets. Use the same source and destination bucket to rename. Overwrites the destination if it exists.
+Moves an object to another location (copy + delete of the source), within the same bucket or across buckets. Use the same source and destination bucket with a different name to rename. Moving an object onto itself (same bucket and name) is refused. Overwrites the destination if it exists.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -278,10 +279,10 @@ Moves an object to another location (copy + delete of the source), within the sa
 | `destinationBucketName` | `Text` | Bucket to move into (can equal the source) |
 | `destinationObjectName` | `Text` | Full path/filename for the destination |
 
-> **Note:** Move is copy-then-delete and is not atomic. If the copy succeeds but the source can't be deleted, the action reports explicitly that both objects now exist.
+> **Note:** Move is copy-then-delete and is not atomic. Both steps are guarded by the source's generation: if another request replaces the source during the move, nothing is lost. The move either reports that nothing was moved, or that both objects exist and the source holds newer data. If the copy succeeds but the source can't be deleted, the action reports explicitly that both objects now exist. A missing destination bucket and a missing source object are reported as such.
 
 #### `Object_UpdateMetadata`
-Changes an object's content headers and custom metadata **without re-uploading its content**. Only the fields you provide change: empty text inputs are left untouched, and an empty `metadata` list leaves custom metadata untouched. Within `metadata`, an entry with an empty `Value` **removes** that key. A call with nothing to update is rejected. The write is guarded by a metageneration precondition, so concurrent metadata updates fail cleanly instead of silently overwriting each other.
+Changes an object's content headers and custom metadata **without re-uploading its content**. Only the fields you provide change: empty text inputs are left untouched, and an empty `metadata` list leaves custom metadata untouched. Within `metadata`, an entry with an empty `Value` **removes** that key. A call with nothing to update is rejected. The write is guarded by generation and metageneration preconditions, so a concurrent metadata update, or a replacement of the object's content, makes the call fail cleanly ("changed by another request … retry") instead of being silently overwritten.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -296,7 +297,7 @@ Changes an object's content headers and custom metadata **without re-uploading i
 | `metadata` | `List of MetadataEntry` | Custom metadata changes. Empty list = unchanged. An entry with an empty `Value` removes that key; others are set/overwritten. |
 
 #### `Object_DeleteByPrefix`
-Deletes every object under a prefix (a "folder" and everything below it) server-side, and returns how many were deleted. The prefix is **mandatory and cannot be empty**, as a safety guard against wiping an entire bucket. Concurrent deletions are tolerated; a mid-operation failure reports exactly how many objects were already deleted.
+Deletes every object under a prefix (a "folder" and everything below it) server-side, and returns how many were deleted. The prefix is **mandatory and cannot be empty**, as a safety guard against wiping an entire bucket. Concurrent deletions are tolerated; a mid-operation failure reports exactly how many objects were already deleted, with the translated cause.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -310,7 +311,7 @@ Deletes every object under a prefix (a "folder" and everything below it) server-
 |--------|------|-------------|
 | `deletedCount` | `Long Integer` | Number of objects that were deleted |
 
-> **Note:** Move is copy-then-delete and is not atomic — the source is removed only after a successful copy.
+> **Time budget:** one call deletes for at most **75 seconds** (ODC stops an action at 95). If the prefix holds more objects than that, the action stops with an error saying how many were deleted. Nothing is rolled back; call it again with the same prefix to delete the rest.
 
 #### `Object_GetSignedUrl`
 Generates a time-limited V4 signed URL for secure, direct-to-browser file access. The `operation` controls the action the URL permits: download, upload, or delete.
@@ -320,10 +321,10 @@ Generates a time-limited V4 signed URL for secure, direct-to-browser file access
 |----------|------|-------------|
 | `authentication` | `Authentication` | GCP credentials |
 | `bucketName` | `Text` | Source bucket |
-| `objectName` | `Text` | Full path/filename |
-| `expirationMinutes` | `Integer` | Link validity duration, `1`–`10080` (a V4 signed URL is valid for at most 7 days). Values outside this range raise a clear error. |
+| `objectName` | `Text` | Full path/filename. Required: an empty name would sign a URL for the whole bucket. |
+| `expirationMinutes` | `Integer` | Link validity duration, `1`–`10080` (a V4 signed URL is valid for at most 7 days). Values outside this range raise a clear error. With `WorkloadIdentityFederation`, Google guarantees a `signBlob` signature for **12 hours** only: a longer URL may stop working earlier when Google rotates its signing keys. Use a service account key if you need longer-lived URLs. |
 | `operation` | `Text` | Optional. `Download` (GET), `Upload` (PUT), or `Delete` (DELETE). Case-insensitive. Defaults to `Download`. |
-| `contentType` | `Text` | Optional, for `Upload` URLs. The exact `Content-Type` the client will send in the PUT request. It becomes part of the signature, so Google rejects uploads with a different `Content-Type`. Leave empty to allow any. |
+| `contentType` | `Text` | Optional, `Upload` URLs only (ignored for `Download` and `Delete`). The exact `Content-Type` the client will send in the PUT request. It becomes part of the signature, so Google rejects uploads with a different `Content-Type`. Leave empty to allow any. Line breaks are rejected. |
 
 **Outputs:**
 | Output | Type | Description |
@@ -470,9 +471,9 @@ GoogleCloudStorage_ODC/
 
 ## Build and Deployment
 
-1. **Publish:** Run `dotnet publish` as shown in Quick Start.
-2. **Clean:** Delete `OutSystems.ExternalLibraries.SDK.dll` from the `publish/` directory.
-3. **Zip:** Compress all remaining files into a flat structure (no subfolders).
+1. **Publish:** Run `dotnet publish` as shown in Quick Start. The output is in `bin/Release/net10.0/publish/`.
+2. **Clean:** Delete `OutSystems.ExternalLibraries.SDK.dll` (ODC provides it) and the `.pdb` from that folder.
+3. **Zip:** Compress the folder's contents, not the folder itself: the DLLs and `.deps.json` at the root of the zip, plus the `runtimes/` folder that `dotnet publish` produces (a dependency of `Google.Apis.Auth`).
 4. **Deploy:** Upload to ODC Portal > External Logic.
 
 ---
@@ -497,10 +498,10 @@ dotnet test --filter "FullyQualifiedName~OfflineTests"   # offline only, no netw
 ## Best Practices
 
 - **Security:** Mark `PrivateKey` as a **Secret** App Setting in ODC to ensure it is encrypted and masked in logs.
-- **Large files:** ODC caps custom code input and output at 5.5 MB, so for files over ~5 MB use `Object_GetSignedUrl` and let the client transfer the file directly with Google.
+- **Large files:** ODC caps custom code input and output at 5.5 MB, so for files over ~5 MB use `Object_GetSignedUrl` and let the client transfer the file directly with Google. `Object_Download` refuses larger objects with that advice. Large `Object_List` results count toward the same limit: page them with `MaxResults` / `NextPageToken`.
 - **Naming:** Follow GCS bucket naming constraints (3-63 characters, lowercase letters, numbers, and hyphens).
 - **Tag your objects:** Use the `metadata` input on `Object_Upload` (or `Object_UpdateMetadata` later) to attach business context — tenant, owner, document type — that you can read back cheaply with `Object_GetMetadata` without downloading the file.
-- **Edit metadata in place:** Use `Object_UpdateMetadata` to fix a `ContentType` or relabel objects without re-uploading their content; it is metageneration-guarded so concurrent edits fail cleanly.
+- **Edit metadata in place:** Use `Object_UpdateMetadata` to fix a `ContentType` or relabel objects without re-uploading their content; it is precondition-guarded, so concurrent edits fail cleanly.
 - **Delete folders safely:** Use `Object_DeleteByPrefix` to remove a whole "folder" in one call — the mandatory, non-empty prefix guards against wiping an entire bucket by accident.
 
 ---
