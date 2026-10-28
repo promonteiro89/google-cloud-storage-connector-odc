@@ -42,6 +42,15 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
     /// <summary>Optional signBlob failure status.</summary>
     public HttpStatusCode? SignBlobFailure { get; set; }
 
+    /// <summary>Optional custom IdP response generator or override.</summary>
+    public Func<HttpRequestMessage, HttpResponseMessage?>? IdpResponseOverride { get; set; }
+
+    /// <summary>Optional exception thrown when reaching the IdP endpoint.</summary>
+    public Exception? IdpException { get; set; }
+
+    /// <summary>Lifetime in seconds returned by the IdP (default 3600).</summary>
+    public int IdpExpiresIn { get; set; } = 3600;
+
     /// <summary>
     /// When true, the resumable-upload endpoint flips one bit of the received data, as a transit
     /// error would. Like the real server, it then rejects the upload if the client's x-goog-hash
@@ -51,6 +60,15 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
 
     /// <summary>Objects successfully stored by the fake upload endpoint, by "bucket/name".</summary>
     public Dictionary<string, byte[]> StoredObjects { get; } = new();
+
+    /// <summary>Metadata of one object the fake Storage API serves, as "bucket/name".</summary>
+    public sealed record FakeObject(long Generation, long Metageneration, string ContentType = "text/plain", long Size = 5);
+
+    /// <summary>Objects served by `GET /storage/v1/b/{bucket}/o/{object}` (and accepted by PUT).</summary>
+    public Dictionary<string, FakeObject> Objects { get; } = new();
+
+    /// <summary>When true, every object update (`PUT .../o/{object}`) answers 412 Precondition Failed.</summary>
+    public bool FailObjectUpdateWithPrecondition { get; set; }
 
     private readonly Dictionary<string, (string Bucket, string Name)> _uploadSessions = new();
 
@@ -77,10 +95,15 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
 
         if (url.StartsWith(IdpTokenEndpoint, StringComparison.Ordinal))
         {
+            if (IdpException != null)
+                throw IdpException;
+            if (IdpResponseOverride?.Invoke(request) is { } custom)
+                return custom;
+
             bool usedBasic = auth?.StartsWith("Basic ", StringComparison.Ordinal) == true;
             if (IdpRejectsClient || (IdpRequiresBasicAuth && !usedBasic))
                 return Json(HttpStatusCode.Unauthorized, new { error = "invalid_client", error_description = "Client authentication failed." });
-            return Json(HttpStatusCode.OK, new { access_token = IdpToken, token_type = "Bearer", expires_in = 3600 });
+            return Json(HttpStatusCode.OK, new { access_token = IdpToken, token_type = "Bearer", expires_in = IdpExpiresIn });
         }
 
         if (url.StartsWith("https://sts.googleapis.com/v1/token", StringComparison.Ordinal))
@@ -115,6 +138,43 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
         if (url.StartsWith("https://storage.googleapis.com/upload/storage/v1/b/", StringComparison.Ordinal))
             return ResumableUpload(request, url, content, headers);
 
+        // Object metadata: GET (Object_UpdateMetadata's read) and PUT (its write, with the
+        // ifGenerationMatch/ifMetagenerationMatch preconditions in the query string).
+        var segments = request.RequestUri!.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (url.StartsWith("https://storage.googleapis.com/storage/v1/b/", StringComparison.Ordinal)
+            && segments.Length > 5 && segments[4] == "o")
+        {
+            string bucket = segments[3];
+            string objectName = Uri.UnescapeDataString(string.Join('/', segments.Skip(5)));
+            string key = bucket + "/" + objectName;
+
+            if (request.Method == HttpMethod.Get)
+            {
+                if (!Objects.TryGetValue(key, out var existing))
+                    return Json(HttpStatusCode.NotFound, new { error = new { code = 404, message = $"No such object: {key}" } });
+                return Json(HttpStatusCode.OK, ObjectJson(bucket, objectName, existing));
+            }
+
+            if (request.Method == HttpMethod.Put || request.Method == HttpMethod.Patch)
+            {
+                if (FailObjectUpdateWithPrecondition)
+                    return Json(HttpStatusCode.PreconditionFailed, new { error = new { code = 412, message = "At least one of the pre-conditions you specified did not hold." } });
+                if (!Objects.TryGetValue(key, out var existing))
+                    return Json(HttpStatusCode.NotFound, new { error = new { code = 404, message = $"No such object: {key}" } });
+
+                string contentType = existing.ContentType;
+                if (content.Length > 0)
+                {
+                    using var update = JsonDocument.Parse(content);
+                    if (update.RootElement.TryGetProperty("contentType", out var ct) && ct.GetString() is { Length: > 0 } updated)
+                        contentType = updated;
+                }
+                var stored = existing with { Metageneration = existing.Metageneration + 1, ContentType = contentType };
+                lock (Objects) Objects[key] = stored;
+                return Json(HttpStatusCode.OK, ObjectJson(bucket, objectName, stored));
+            }
+        }
+
         if (url.StartsWith("https://storage.googleapis.com/storage/v1/b/", StringComparison.Ordinal) && request.Method == HttpMethod.Get)
         {
             var bucket = request.RequestUri!.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries)[3];
@@ -123,6 +183,17 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
 
         return Json(HttpStatusCode.NotFound, new { error = new { code = 404, message = $"FakeFederationBackend has no route for {request.Method} {url}" } });
     }
+
+    private static object ObjectJson(string bucket, string name, FakeObject obj) => new
+    {
+        kind = "storage#object",
+        bucket,
+        name,
+        size = obj.Size.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        contentType = obj.ContentType,
+        generation = obj.Generation.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        metageneration = obj.Metageneration.ToString(System.Globalization.CultureInfo.InvariantCulture)
+    };
 
     /// <summary>
     /// Google's resumable upload: POST starts a session (metadata JSON, Location header back), then

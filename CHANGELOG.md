@@ -4,6 +4,50 @@ All notable changes to the **Google Cloud Storage Connector for ODC** are docume
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-10-28
+
+Security and reliability release: credential isolation for Workload Identity Federation, a hardened token endpoint, safer `Object_Move` / `Object_UpdateMetadata`, and clear errors where ODC's platform limits used to cut actions off. No action, input or output changed.
+
+### Security
+
+- **A supplied `SubjectToken` is never reused for another caller.** The token is now part of the federated cache key (hashed) and each cached identity holds exactly one token. Before, every caller with the same provider and service account shared one cached identity, so a caller with an expired or wrong token could run on another caller's Google access token.
+- **Expired subject tokens are rejected up front.** The JWT `exp` is read (signature not checked) and a token that expired more than 30 seconds ago fails before any network call. Cached entries built from a supplied token expire at its `exp` (or after 5 minutes when it has none), and client-credentials tokens are cached until the earlier of `expires_in` and their own `exp`.
+- **Hardened `TokenEndpoint`:**
+  - https only; plain `http` on loopback is accepted only by the test harness.
+  - A URL with user information (`user:password@`) is rejected, and is never echoed.
+  - Identity-provider redirects are no longer followed (a `307`/`308` re-sent the client secret to the redirect target); a `3xx` now fails with a "redirected" error.
+  - Error messages never echo the provider's raw response body or the endpoint's query string: they show the OAuth `error` / `error_description` (truncated to 300 characters), or the size and `Content-Type` of a non-JSON response.
+  - The production client also renews its connections every 5 minutes, so DNS changes of the identity provider are picked up.
+- **`Object_GetSignedUrl`:** `BucketName` and `ObjectName` are required (an empty object name signed a URL for the whole bucket, including for `Delete`); a `ContentType` with line breaks is rejected; `ContentType` is signed only for `Upload` and ignored for `Download` / `Delete`.
+
+### Fixed
+
+- **`Object_Move` onto itself deleted the object.** Moving an object to the same bucket and name is now refused before any call. The move is also guarded by the source's generation: a source replaced during the move is reported ("nothing was moved", or "both objects exist and the source holds newer data") instead of being deleted.
+- **`Object_UpdateMetadata` could write stale metadata onto new content.** It set only a metageneration precondition, which turned off the SDK's automatic generation check; a content replacement resets the metageneration, so a stale update still matched. Both preconditions are now sent, and a conflict reports that the object was changed by another request.
+- **`Object_Copy` and `Object_Move` named the wrong side of a 404.** A copy to a missing destination bucket reported the *source* bucket as missing. The connector now checks the source again and names whichever side is actually missing.
+- **A missing object in a bucket whose name contains "bucket"** (e.g. `acme-bucket`) was reported as a missing bucket, and `Object_Exists` / `Object_GetMetadata` threw instead of returning `False`.
+- **Downloads of gzip-encoded objects** no longer fail the hash check on valid data (`DownloadValidationMode.Automatic`).
+- Text outputs of `Object_List`, `Bucket_List` and `Object_Download` are never null; `Object_Upload` accepts empty `Content` and an empty `ContentType`; `Bucket_Create` with an empty `Location` uses Google's default; timestamps without an offset are read as UTC.
+
+### Changed
+
+- **One error translator for every action.** Network failures ("Could not reach Google Cloud"), timeouts, and identity provider errors (previously hidden behind the Google SDK's generic subject-token error) now give actionable messages everywhere, including in `Object_DeleteByPrefix`'s partial-failure report. The signing error suggests "Service Account Token Creator" only for a `403`.
+- **ODC platform limits are handled by the connector:**
+  - Every request to Google Cloud Storage times out after **80 seconds**, below ODC's 95-second action limit, with the connector's own message.
+  - `Object_Download` refuses objects larger than **5.5 MB** (ODC's payload limit) with an error pointing to `Object_GetSignedUrl`, instead of transferring the whole object first.
+  - `Object_DeleteByPrefix` stops after **75 seconds** and reports how many objects it deleted; call it again with the same prefix to continue.
+- Empty bucket and object names are rejected by every action before any call to Google.
+- **Credential caches are bounded and expire:** entries are dropped after 60 minutes without use (or at a supplied token's expiry), at most 500 per cache, least recently used first. A service account key is parsed once and shared by the storage client and the URL signer; cache keys length-prefix every part, so different credentials can never collide.
+
+### Compatibility
+
+- No signature changes: apps don't need to remap any action. Republish consuming apps to pick up this revision.
+- Behaviour that can surface in existing apps:
+  - a `TokenEndpoint` that redirects now fails;
+  - an expired `SubjectToken` now fails before calling Google;
+  - `ContentType` no longer restricts `Download` and `Delete` signed URLs;
+  - downloads over 5.5 MB fail with the connector's message (they already failed at ODC's payload limit).
+
 ## [1.6.1] - 2026-10-09
 
 Maintenance release: end-to-end upload integrity. No changes to actions, inputs, or outputs; a drop-in replacement for 1.6.0.
@@ -102,6 +146,8 @@ New object-listing, folder-navigation, and signed-URL capabilities, plus more ac
 
 - **`Object_List` signature changed.** It gained required inputs (`MaxResults`, `PageToken`, `Delimiter`) and outputs (`NextPageToken`, `PrefixList`). Apps that consume `Object_List` in Service Studio must remap the action after upgrading. All other changes are backward-compatible — the new `ContentType` on `Object_GetSignedUrl` is optional.
 
+[1.7.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.7.0
+[1.6.1]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.6.1
 [1.6.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.6.0
 [1.5.2]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.5.2
 [1.5.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.5.0

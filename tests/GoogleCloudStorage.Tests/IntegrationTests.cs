@@ -400,4 +400,221 @@ public class IntegrationTests
         }
         finally { Cleanup(b); }
     }
+
+    // ---- regression: move / copy / delete / download / upload --------------------------
+
+    [SkippableFact]
+    public void E1_Move_onto_itself_is_rejected_and_the_object_survives()
+    {
+        RequireEmulator();
+        var b = NewBucket();
+        try
+        {
+            Upload(b, "same.txt", Encoding.UTF8.GetBytes("keep me"), "text/plain");
+
+            var ex = Assert.Throws<ArgumentException>(() =>
+                _sut.Object_Move(TestSupport.Auth(), b, "same.txt", b, "same.txt"));
+            Assert.Contains("same object", ex.Message);
+
+            _sut.Object_Download(TestSupport.Auth(), b, "same.txt", out var file);
+            Assert.Equal("keep me", Encoding.UTF8.GetString(file.Content));
+        }
+        finally { Cleanup(b); }
+    }
+
+    [SkippableFact]
+    public void E2_Move_into_a_missing_bucket_names_the_destination_and_keeps_the_source()
+    {
+        RequireEmulator();
+        var b = NewBucket();
+        try
+        {
+            Upload(b, "move-src.txt", Encoding.UTF8.GetBytes("m"), "text/plain");
+            var missing = "itest-missing-" + Guid.NewGuid().ToString("N")[..8];
+
+            var ex = Assert.ThrowsAny<Exception>(() =>
+                _sut.Object_Move(TestSupport.Auth(), b, "move-src.txt", missing, "moved.txt"));
+            Assert.Contains(missing, ex.Message);
+            Assert.Contains("does not exist", ex.Message);
+
+            _sut.Object_Exists(TestSupport.Auth(), b, "move-src.txt", out var stillThere);
+            Assert.True(stillThere);
+        }
+        finally { Cleanup(b); }
+    }
+
+    [SkippableFact]
+    public void E3_Move_of_a_missing_source_names_the_source_object()
+    {
+        RequireEmulator();
+        var b = NewBucket();
+        try
+        {
+            var ex = Assert.ThrowsAny<Exception>(() =>
+                _sut.Object_Move(TestSupport.Auth(), b, "no-such-src.txt", b, "dst.txt"));
+            Assert.Contains("was not found", ex.Message);
+            Assert.Contains("no-such-src.txt", ex.Message);
+        }
+        finally { Cleanup(b); }
+    }
+
+    [SkippableFact]
+    public void E4_Copy_into_a_missing_bucket_names_the_destination_bucket()
+    {
+        RequireEmulator();
+        var b = NewBucket();
+        try
+        {
+            Upload(b, "copy-src.txt", Encoding.UTF8.GetBytes("c"), "text/plain");
+            var missing = "itest-missing-" + Guid.NewGuid().ToString("N")[..8];
+
+            var ex = Assert.ThrowsAny<Exception>(() =>
+                _sut.Object_Copy(TestSupport.Auth(), b, "copy-src.txt", missing, "copy-dst.txt"));
+            Assert.Contains(missing, ex.Message);
+            Assert.Contains("does not exist", ex.Message);
+        }
+        finally { Cleanup(b); }
+    }
+
+    [SkippableFact]
+    public void E5_Copy_of_a_missing_source_names_the_source_object()
+    {
+        RequireEmulator();
+        var b = NewBucket();
+        try
+        {
+            var ex = Assert.ThrowsAny<Exception>(() =>
+                _sut.Object_Copy(TestSupport.Auth(), b, "no-such-src.txt", b, "copy-dst.txt"));
+            Assert.Contains("Object 'no-such-src.txt' was not found", ex.Message);
+        }
+        finally { Cleanup(b); }
+    }
+
+    [SkippableFact]
+    public void E6_Download_rejects_objects_over_the_action_payload_cap_and_accepts_exactly_the_cap()
+    {
+        RequireEmulator();
+        var b = NewBucket();
+        try
+        {
+            var tooBig = new byte[Connector.MaxDownloadBytes + 1];
+            new Random(11).NextBytes(tooBig);
+            Upload(b, "over-cap.bin", tooBig, "application/octet-stream");
+
+            var ex = Assert.ThrowsAny<Exception>(() =>
+                _sut.Object_Download(TestSupport.Auth(), b, "over-cap.bin", out _));
+            Assert.Contains("Object_GetSignedUrl", ex.Message);
+            Assert.Contains("larger than", ex.Message);
+
+            var exact = new byte[Connector.MaxDownloadBytes];
+            new Random(12).NextBytes(exact);
+            Upload(b, "at-cap.bin", exact, "application/octet-stream");
+
+            _sut.Object_Download(TestSupport.Auth(), b, "at-cap.bin", out var file);
+            Assert.Equal(exact, file.Content);
+        }
+        finally { Cleanup(b); }
+    }
+
+    [SkippableFact]
+    public void E7_Upload_accepts_null_content_and_an_empty_content_type()
+    {
+        RequireEmulator();
+        var b = NewBucket();
+        try
+        {
+            _sut.Object_Upload(TestSupport.Auth(), b, "null-content.bin",
+                new GcsFile { Content = null!, ContentType = "application/octet-stream" }, []);
+
+            _sut.Object_GetMetadata(TestSupport.Auth(), b, "null-content.bin", out var exists, out var md, out _);
+            Assert.True(exists);
+            Assert.Equal(0, md.Size);
+
+            _sut.Object_Download(TestSupport.Auth(), b, "null-content.bin", out var empty);
+            Assert.Empty(empty.Content);
+
+            _sut.Object_Upload(TestSupport.Auth(), b, "no-type.txt",
+                new GcsFile { Content = Encoding.UTF8.GetBytes("x"), ContentType = "" }, []);
+
+            _sut.Object_Download(TestSupport.Auth(), b, "no-type.txt", out var file);
+            Assert.Equal("x", Encoding.UTF8.GetString(file.Content));
+            Assert.NotNull(file.ContentType);
+        }
+        finally { Cleanup(b); }
+    }
+
+    [SkippableFact]
+    public void E8_Bucket_Create_with_an_empty_location_succeeds()
+    {
+        RequireEmulator();
+        var name = "itest-" + Guid.NewGuid().ToString("N")[..12];
+        try
+        {
+            _sut.Bucket_Create(TestSupport.Auth(), name, "");
+            _sut.Bucket_Exists(TestSupport.Auth(), name, out var exists);
+            Assert.True(exists);
+        }
+        finally { Cleanup(name); }
+    }
+
+    [SkippableFact]
+    public void E9_Object_List_never_returns_a_null_name_or_content_type()
+    {
+        RequireEmulator();
+        var b = NewBucket();
+        try
+        {
+            _sut.Object_Upload(TestSupport.Auth(), b, "plain-1.txt",
+                new GcsFile { Content = Encoding.UTF8.GetBytes("1"), ContentType = "" }, []);
+            _sut.Object_Upload(TestSupport.Auth(), b, "plain-2.txt",
+                new GcsFile { Content = Encoding.UTF8.GetBytes("2"), ContentType = "" }, []);
+
+            _sut.Object_List(TestSupport.Auth(), b, "plain-", 0, "", "", out var objects, out _, out _);
+            var list = objects.ToList();
+            Assert.Equal(2, list.Count);
+            Assert.All(list, o =>
+            {
+                Assert.NotNull(o.Name);
+                Assert.NotNull(o.ContentType);
+            });
+        }
+        finally { Cleanup(b); }
+    }
+
+    [SkippableFact]
+    public void E10_DeleteByPrefix_stops_at_the_budget_with_partial_progress_and_can_be_resumed()
+    {
+        RequireEmulator();
+        var b = NewBucket();
+        var savedBudget = Connector.DeleteByPrefixBudget;
+        try
+        {
+            for (int i = 0; i < 3; i++)
+                Upload(b, $"budget/{i}.txt", Encoding.UTF8.GetBytes(i.ToString()), "text/plain");
+
+            Connector.DeleteByPrefixBudget = TimeSpan.Zero;
+            try
+            {
+                var ex = Assert.ThrowsAny<Exception>(() =>
+                    _sut.Object_DeleteByPrefix(TestSupport.Auth(), b, "budget/", out _));
+                Assert.Contains("Deleted 0 of 3", ex.Message);
+                Assert.Contains("call Object_DeleteByPrefix again", ex.Message);
+            }
+            finally
+            {
+                Connector.DeleteByPrefixBudget = savedBudget;
+            }
+
+            _sut.Object_List(TestSupport.Auth(), b, "budget/", 0, "", "", out var left, out _, out _);
+            Assert.Equal(3, left.Count());
+
+            _sut.Object_DeleteByPrefix(TestSupport.Auth(), b, "budget/", out var deleted);
+            Assert.Equal(3, deleted);
+        }
+        finally
+        {
+            Connector.DeleteByPrefixBudget = savedBudget;
+            Cleanup(b);
+        }
+    }
 }
