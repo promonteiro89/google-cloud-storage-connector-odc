@@ -23,15 +23,15 @@ public sealed class FederationTests : IDisposable
     public FederationTests()
     {
         // These tests exercise the real Google endpoints (faked); make sure the emulator hook is off.
-        _savedEmulatorHost = Environment.GetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST");
-        Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", null);
+        _savedEmulatorHost = Connector.EmulatorBaseUri;
+        Connector.EmulatorBaseUri = null;
         Connector.HttpClientFactoryOverride = new FakeHttpClientFactory(_backend);
     }
 
     public void Dispose()
     {
         Connector.HttpClientFactoryOverride = null;
-        Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", _savedEmulatorHost);
+        Connector.EmulatorBaseUri = _savedEmulatorHost;
     }
 
     /// <summary>A unique service account per test keeps the connector's static caches from leaking between tests.</summary>

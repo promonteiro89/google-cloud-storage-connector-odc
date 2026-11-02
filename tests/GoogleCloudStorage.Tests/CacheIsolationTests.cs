@@ -28,15 +28,15 @@ public sealed class CacheIsolationTests : IDisposable
 
     public CacheIsolationTests()
     {
-        _savedEmulatorHost = Environment.GetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST");
-        Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", null);
+        _savedEmulatorHost = Connector.EmulatorBaseUri;
+        Connector.EmulatorBaseUri = null;
         Connector.HttpClientFactoryOverride = new FakeHttpClientFactory(_backend);
     }
 
     public void Dispose()
     {
         Connector.HttpClientFactoryOverride = null;
-        Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", _savedEmulatorHost);
+        Connector.EmulatorBaseUri = _savedEmulatorHost;
     }
 
     private static string UniqueServiceAccount() => $"sa-{Guid.NewGuid():N}"[..20] + "@proj.iam.gserviceaccount.com";
@@ -548,19 +548,39 @@ public sealed class CacheIsolationTests : IDisposable
     }
 
     [Fact]
-    public void S2_StorageClient_timeout_set_to_80_seconds()
+    public void E8_the_old_emulator_environment_variable_no_longer_redirects_storage()
     {
-        string? savedEmulator = Environment.GetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST");
+        // 1.7.1: only the internal EmulatorBaseUri seam can point the connector at an emulator.
+        string? savedSeam = Connector.EmulatorBaseUri;
+        string? savedVar = Environment.GetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST");
         try
         {
-            Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", null);
+            Connector.EmulatorBaseUri = null;
+            Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", "127.0.0.1:1");
+            var client = (StorageClient)StorageClientFor(TestSupport.Auth(clientEmail: $"e8-{Guid.NewGuid():N}"[..12] + "@fake-project.iam.gserviceaccount.com"))!;
+            Assert.StartsWith("https://storage.googleapis.com/", client.Service.BaseUri);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", savedVar);
+            Connector.EmulatorBaseUri = savedSeam;
+        }
+    }
+
+    [Fact]
+    public void S2_StorageClient_timeout_set_to_80_seconds()
+    {
+        string? savedEmulator = Connector.EmulatorBaseUri;
+        try
+        {
+            Connector.EmulatorBaseUri = null;
             var auth = TestSupport.Auth();
             var client = (StorageClient)StorageClientFor(auth)!;
             Assert.Equal(TimeSpan.FromSeconds(80), client.Service.HttpClient.Timeout);
         }
         finally
         {
-            Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", savedEmulator);
+            Connector.EmulatorBaseUri = savedEmulator;
         }
     }
 

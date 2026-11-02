@@ -32,12 +32,12 @@ public sealed class LiveFederationTests : IDisposable
 
     public LiveFederationTests()
     {
-        _savedEmulatorHost = Environment.GetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST");
-        Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", null);
+        _savedEmulatorHost = Connector.EmulatorBaseUri;
+        Connector.EmulatorBaseUri = null;
         Connector.HttpClientFactoryOverride = null; // real Google endpoints only
     }
 
-    public void Dispose() => Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", _savedEmulatorHost);
+    public void Dispose() => Connector.EmulatorBaseUri = _savedEmulatorHost;
 
     private static void RequireLiveEnvironment() =>
         Skip.If(string.IsNullOrEmpty(RequestUrl) || string.IsNullOrEmpty(RequestToken)

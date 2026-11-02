@@ -215,8 +215,8 @@ public class RegressionTests
     [Fact]
     public void E11_UpdateMetadata_sends_generation_and_metageneration_preconditions_and_explains_a_412()
     {
-        var savedEmulatorHost = Environment.GetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST");
-        Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", null);
+        var savedEmulatorHost = Connector.EmulatorBaseUri;
+        Connector.EmulatorBaseUri = null;
         var backend = new FakeFederationBackend();
         var previousFactory = Connector.HttpClientFactoryOverride;
         Connector.HttpClientFactoryOverride = new FakeHttpClientFactory(backend);
@@ -245,7 +245,7 @@ public class RegressionTests
         finally
         {
             Connector.HttpClientFactoryOverride = previousFactory;
-            Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", savedEmulatorHost);
+            Connector.EmulatorBaseUri = savedEmulatorHost;
         }
     }
 

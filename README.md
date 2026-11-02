@@ -177,7 +177,7 @@ Persists a file to a specific GCS bucket, optionally with custom metadata.
 > **Integrity check:** the upload carries a CRC32C checksum of `file.Content`. If the data Google receives doesn't match, the upload fails with an "Upload rejected by Google Cloud Storage … retry the upload" error, nothing is stored, and any existing object with that name is left unchanged.
 
 #### `Object_Download`
-Retrieves a file and its metadata from GCS. Objects larger than **5.5 MB** (ODC's payload limit for an action) are refused with an error pointing to `Object_GetSignedUrl`; download those directly from Google with a signed URL.
+Retrieves a file and its metadata from GCS. Objects stored with `Content-Encoding: gzip` are returned **decompressed**, so `Content` can be larger than the stored `Size`. Objects larger than **5.5 MB** (ODC's payload limit for an action) are refused with an error pointing to `Object_GetSignedUrl`; download those directly from Google with a signed URL.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -211,6 +211,8 @@ Lists objects in a bucket, optionally filtered by prefix, with support for pagin
 | `nextPageToken` | `Text` | Non-empty when more results exist (paged mode only) — pass it as `PageToken` in the next call |
 | `prefixList` | `List of Prefix` | The "folders" found directly under `Prefix` when `Delimiter` is set |
 
+> **Page size:** Google returns at most **1,000** entries per page, even when `MaxResults` is higher, and with a `Delimiter` the folder entries in `PrefixList` count towards `MaxResults` together with `Objects`.
+>
 > **Pagination:** pass a `MaxResults` greater than `0` to return a single page, then feed the returned `NextPageToken` back as `PageToken` until it comes back empty. With `MaxResults = 0` every object is returned in one call (no `NextPageToken`).
 
 #### `Object_Exists`
@@ -246,7 +248,7 @@ Retrieves an object's full metadata (size, content type, hashes, generation, sto
 | `customMetadata` | `List of MetadataEntry` | The object's custom key-value metadata. Empty when the object has none or does not exist. |
 
 #### `Object_Delete`
-Permanently removes an object from a bucket.
+Deletes an object from a bucket. On a bucket with **Object Versioning** or **soft delete** enabled, Google keeps a noncurrent or soft-deleted copy that can be restored (and is billed) until it expires; on other buckets the object is gone. The delete is not retried automatically: a failed call can be retried safely by the caller.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -297,7 +299,7 @@ Changes an object's content headers and custom metadata **without re-uploading i
 | `metadata` | `List of MetadataEntry` | Custom metadata changes. Empty list = unchanged. An entry with an empty `Value` removes that key; others are set/overwritten. |
 
 #### `Object_DeleteByPrefix`
-Deletes every object under a prefix (a "folder" and everything below it) server-side, and returns how many were deleted. The prefix is **mandatory and cannot be empty**, as a safety guard against wiping an entire bucket. Concurrent deletions are tolerated; a mid-operation failure reports exactly how many objects were already deleted, with the translated cause.
+Deletes every object under a prefix (a "folder" and everything below it) server-side, and returns how many were deleted. The prefix is **mandatory and cannot be empty**, as a safety guard against wiping an entire bucket. Each object is deleted only if it is still the generation that was listed, so transient errors are retried automatically. An object deleted (404) or replaced (412) by someone else after the listing is skipped and not counted, so new data written under the prefix during the call is never deleted. A mid-operation failure reports exactly how many objects were already deleted, with the translated cause. Versioning and soft delete apply as for `Object_Delete`.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -451,9 +453,11 @@ Represents the complete metadata of an object (returned by `Object_GetMetadata`)
 
 ```
 GoogleCloudStorage_ODC/
-├── GoogleCloudStorage.csproj   # Dependencies: Google.Cloud.Storage.V1, Google.Apis.Auth
+├── GoogleCloudStorage.csproj   # OutSystems.ExternalLibraries.SDK, Google.Cloud.Storage.V1, Google.Apis.Auth,
+│                               #   Google.Apis.Storage.v1, Google.Api.Gax.Rest (pinned)
 ├── IGoogleCloudStorage.cs      # OSInterface & OSAction definitions
-├── GoogleCloudStorage.cs       # StorageClient implementation & credential handling
+├── GoogleCloudStorage.cs       # Actions, input guards and the shared error translator
+├── GoogleCloudStorage.Auth.cs  # Authentication (key and Workload Identity Federation), caches
 ├── Resources/                  # Branding assets
 │   ├── app_icon.png            # Library icon
 │   └── action_icon.png         # Action-level icon
@@ -465,6 +469,7 @@ GoogleCloudStorage_ODC/
     ├── ObjectMetadata.cs       # Full object metadata
     ├── Prefix.cs               # Folder-style entry (Object_List with Delimiter)
     └── MetadataEntry.cs        # Custom key-value metadata pair
+tests/GoogleCloudStorage.Tests/ # xUnit suite: offline, emulator, federation contract, live (CI)
 ```
 
 ---
@@ -488,7 +493,7 @@ dotnet test --filter "FullyQualifiedName~OfflineTests"   # offline only, no netw
 ```
 
 - **Offline tests** (signed URLs, validation, caching) use a throwaway in-memory RSA key — V4 signing is local cryptography.
-- **Integration tests** run the connector against [fake-gcs-server](https://github.com/fsouza/fake-gcs-server) via the `GCSCONNECTOR_EMULATOR_HOST` hook. This variable is honored **only for local testing** and is never set on a real ODC server, where the connector always talks to production GCS. The test fixture starts the emulator automatically and skips (rather than fails) if it can't. See [`tests/README.md`](tests/README.md) for details.
+- **Integration tests** run the connector against [fake-gcs-server](https://github.com/fsouza/fake-gcs-server) via the connector's internal `EmulatorBaseUri` test seam, which only the test assembly can set; no environment variable or setting can redirect the connector's storage traffic, so a real ODC server always talks to production GCS. The test fixture starts the emulator automatically and skips (rather than fails) if it can't. See [`tests/README.md`](tests/README.md) for details.
 - **Upload integrity tests** check that uploads carry the CRC32C of the exact bytes and that data corrupted in transit is rejected with a clear error, against an in-process fake of Google's resumable-upload endpoint.
 - **Federation contract tests** drive the full Workload Identity Federation chain (identity provider → Google STS → impersonation → Storage / `signBlob`) against an in-process fake, asserting the exact requests on every hop.
 - **Live federation tests** (CI only) run keyless against **real Google Cloud**. GitHub Actions' own OIDC token acts as the identity provider, so no secrets exist anywhere. They verify Google accepts the federated identity and that signed URLs verify against the service account's published certificate.
@@ -499,7 +504,7 @@ dotnet test --filter "FullyQualifiedName~OfflineTests"   # offline only, no netw
 
 - **Security:** Mark `PrivateKey` as a **Secret** App Setting in ODC to ensure it is encrypted and masked in logs.
 - **Large files:** ODC caps custom code input and output at 5.5 MB, so for files over ~5 MB use `Object_GetSignedUrl` and let the client transfer the file directly with Google. `Object_Download` refuses larger objects with that advice. Large `Object_List` results count toward the same limit: page them with `MaxResults` / `NextPageToken`.
-- **Naming:** Follow GCS bucket naming constraints (3-63 characters, lowercase letters, numbers, and hyphens).
+- **Naming:** Bucket names use lowercase letters, digits, hyphens (`-`), underscores (`_`) and dots (`.`), start and end with a letter or digit, and are 3–63 characters long (up to 222 with dots, each dot-separated part at most 63). See Google's [bucket naming rules](https://cloud.google.com/storage/docs/buckets#naming).
 - **Tag your objects:** Use the `metadata` input on `Object_Upload` (or `Object_UpdateMetadata` later) to attach business context — tenant, owner, document type — that you can read back cheaply with `Object_GetMetadata` without downloading the file.
 - **Edit metadata in place:** Use `Object_UpdateMetadata` to fix a `ContentType` or relabel objects without re-uploading their content; it is precondition-guarded, so concurrent edits fail cleanly.
 - **Delete folders safely:** Use `Object_DeleteByPrefix` to remove a whole "folder" in one call — the mandatory, non-empty prefix guards against wiping an entire bucket by accident.

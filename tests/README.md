@@ -7,7 +7,7 @@ The tests run the real connector through its `IGoogleCloudStorage` interface, ex
 ## How it works
 
 - **Offline tests** (signed URLs, input validation, client caching) need no server at all. V4 URL signing is local RSA cryptography, performed with a throwaway 2048-bit key generated in-memory on first run — so there is nothing to install and no secret to manage.
-- **Integration tests** run the connector against [fake-gcs-server](https://github.com/fsouza/fake-gcs-server), a local in-memory Google Cloud Storage emulator, via the connector's `GCSCONNECTOR_EMULATOR_HOST` hook (which it honors only when that variable is set — it is never set on a real ODC server, where the connector always talks to production GCS).
+- **Integration tests** run the connector against [fake-gcs-server](https://github.com/fsouza/fake-gcs-server), a local in-memory Google Cloud Storage emulator, via the connector's internal `EmulatorBaseUri` test seam. Only this test assembly can set it (`InternalsVisibleTo`); the connector reads no environment variable or setting for it, so a real ODC server always talks to production GCS.
 
 The test fixture starts the emulator automatically. If it cannot (e.g. no network and no cached binary), the integration tests **skip** rather than fail, so the offline tests still give a green run on any machine.
 
@@ -23,7 +23,7 @@ dotnet test --filter "FullyQualifiedName~OfflineTests"
 
 ### Pointing at your own emulator
 
-- Set `GCSCONNECTOR_EMULATOR_HOST` (e.g. `127.0.0.1:4443`) and the fixture uses that running server instead of downloading one.
+- Set `FAKE_GCS_HOST` (e.g. `127.0.0.1:4443`) and the fixture uses that running server instead of downloading one. Only the test fixture reads this variable; the connector does not.
 - Set `FAKE_GCS_EXE` to an existing `fake-gcs-server` binary to skip the download.
 - Set `FAKE_GCS_DIR` to control where the downloaded binary is cached (default: the system temp dir).
 

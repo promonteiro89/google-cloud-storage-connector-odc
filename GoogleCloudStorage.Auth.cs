@@ -200,6 +200,14 @@ public partial class GoogleCloudStorage
     /// </summary>
     internal static IHttpClientFactory? HttpClientFactoryOverride { get; set; }
 
+    /// <summary>
+    /// Test seam: base URI of a local Google Cloud Storage emulator (e.g. "http://127.0.0.1:4443"),
+    /// to which every StorageClient then connects unauthenticated. Null in production; it is internal,
+    /// so only the test assembly (InternalsVisibleTo) can set it. No environment variable or setting
+    /// can redirect the connector's storage traffic.
+    /// </summary>
+    internal static string? EmulatorBaseUri { get; set; }
+
     private enum AuthMethod { ServiceAccountKey, WorkloadIdentityFederation }
 
     // ---- Method resolution and validation --------------------------------------------
@@ -337,20 +345,17 @@ public partial class GoogleCloudStorage
 
     /// <summary>
     /// Returns a cached StorageClient for the given credentials, creating it on first use. Every
-    /// client gets the StorageRequestTimeout. Honors the GCSCONNECTOR_EMULATOR_HOST environment
-    /// variable (never set on a real ODC server): when present, connects unauthenticated to a local
-    /// GCS emulator such as fake-gcs-server, enabling integration tests without Google credentials.
-    /// The name is deliberately extension-specific (not Google's STORAGE_EMULATOR_HOST) so a
-    /// machine-wide variable set for other tooling can never silently redirect this connector.
+    /// client gets the StorageRequestTimeout. When the EmulatorBaseUri test seam is set (only the
+    /// test assembly can set it), connects unauthenticated to that local GCS emulator instead.
     /// </summary>
     private static StorageClient GetStorageClient(Authentication authentication)
     {
         var method = ResolveAuthMethod(authentication);
 
-        string? emulatorHost = Environment.GetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST");
-        if (!string.IsNullOrEmpty(emulatorHost))
+        string? emulator = EmulatorBaseUri;
+        if (!string.IsNullOrEmpty(emulator))
         {
-            string baseUri = (emulatorHost.Contains("://") ? emulatorHost : "http://" + emulatorHost).TrimEnd('/') + "/storage/v1/";
+            string baseUri = emulator.TrimEnd('/') + "/storage/v1/";
             return StorageClientCache.GetOrAdd(
                 "emulator|" + baseUri,
                 _ =>
