@@ -67,8 +67,11 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
     /// <summary>Objects served by `GET /storage/v1/b/{bucket}/o/{object}` (and accepted by PUT).</summary>
     public Dictionary<string, FakeObject> Objects { get; } = new();
 
-    /// <summary>When true, every object update (`PUT .../o/{object}`) answers 412 Precondition Failed.</summary>
+    /// <summary>When true, every object update (`PUT`/`PATCH .../o/{object}`) answers 412 Precondition Failed.</summary>
     public bool FailObjectUpdateWithPrecondition { get; set; }
+
+    /// <summary>Optional custom Storage response override evaluated before the built-in storage routes.</summary>
+    public Func<HttpRequestMessage, HttpResponseMessage?>? StorageResponseOverride { get; set; }
 
     private readonly Dictionary<string, (string Bucket, string Name)> _uploadSessions = new();
 
@@ -135,18 +138,74 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
             return Json(HttpStatusCode.OK, new { keyId = "fake-key", signedBlob = Convert.ToBase64String(SignatureBytes) });
         }
 
+        if (url.StartsWith("https://storage.googleapis.com/", StringComparison.Ordinal)
+            && StorageResponseOverride?.Invoke(request) is { } storageOverride)
+        {
+            return storageOverride;
+        }
+
         if (url.StartsWith("https://storage.googleapis.com/upload/storage/v1/b/", StringComparison.Ordinal))
             return ResumableUpload(request, url, content, headers);
 
-        // Object metadata: GET (Object_UpdateMetadata's read) and PUT (its write, with the
-        // ifGenerationMatch/ifMetagenerationMatch preconditions in the query string).
         var segments = request.RequestUri!.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+        // Object rewrite (copy): POST /storage/v1/b/{sb}/o/{so}/rewriteTo/b/{db}/o/{do}
+        if (url.StartsWith("https://storage.googleapis.com/storage/v1/b/", StringComparison.Ordinal)
+            && request.Method == HttpMethod.Post
+            && segments.Length == 11 && segments[4] == "o" && segments[6] == "rewriteTo" && segments[7] == "b" && segments[9] == "o")
+        {
+            string srcBucket = segments[3];
+            string srcObject = Uri.UnescapeDataString(segments[5]);
+            string dstBucket = segments[8];
+            string dstObject = Uri.UnescapeDataString(segments[10]);
+            string srcKey = srcBucket + "/" + srcObject;
+            string dstKey = dstBucket + "/" + dstObject;
+
+            FakeObject copied = Objects.TryGetValue(srcKey, out var srcExisting)
+                ? srcExisting
+                : new FakeObject(Generation: 1, Metageneration: 1);
+            lock (Objects) Objects[dstKey] = copied;
+            return Json(HttpStatusCode.OK, new
+            {
+                kind = "storage#rewriteResponse",
+                done = true,
+                resource = ObjectJson(dstBucket, dstObject, copied)
+            });
+        }
+
+        // Object list: GET /storage/v1/b/{b}/o?prefix=...
+        if (url.StartsWith("https://storage.googleapis.com/storage/v1/b/", StringComparison.Ordinal)
+            && request.Method == HttpMethod.Get
+            && segments.Length == 5 && segments[4] == "o")
+        {
+            string bucket = segments[3];
+            string prefix = System.Web.HttpUtility.ParseQueryString(request.RequestUri!.Query)["prefix"] ?? "";
+            string bucketPrefix = bucket + "/" + prefix;
+            object[] items;
+            lock (Objects)
+            {
+                items = Objects
+                    .Where(kv => kv.Key.StartsWith(bucketPrefix, StringComparison.Ordinal))
+                    .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                    .Select(kv => ObjectJson(bucket, kv.Key[(bucket.Length + 1)..], kv.Value))
+                    .ToArray();
+            }
+            return Json(HttpStatusCode.OK, new { kind = "storage#objects", items });
+        }
+
+        // Object metadata & delete: GET, PUT, PATCH, DELETE /storage/v1/b/{b}/o/{o}
         if (url.StartsWith("https://storage.googleapis.com/storage/v1/b/", StringComparison.Ordinal)
             && segments.Length > 5 && segments[4] == "o")
         {
             string bucket = segments[3];
             string objectName = Uri.UnescapeDataString(string.Join('/', segments.Skip(5)));
             string key = bucket + "/" + objectName;
+
+            if (request.Method == HttpMethod.Delete)
+            {
+                lock (Objects) Objects.Remove(key);
+                return new HttpResponseMessage(HttpStatusCode.NoContent);
+            }
 
             if (request.Method == HttpMethod.Get)
             {

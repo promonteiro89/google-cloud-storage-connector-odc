@@ -230,7 +230,7 @@ public class RegressionTests
             var update = Assert.Single(backend.Requests, r =>
                 r.Method != HttpMethod.Get
                 && r.Uri.AbsolutePath.Contains("/storage/v1/b/test-bucket-alpha/o/", StringComparison.Ordinal));
-            Assert.Equal(HttpMethod.Put, update.Method);
+            Assert.Equal(HttpMethod.Patch, update.Method);
             var query = System.Web.HttpUtility.ParseQueryString(update.Uri.Query);
             Assert.Equal("100", query["ifGenerationMatch"]);
             Assert.Equal("7", query["ifMetagenerationMatch"]);

@@ -224,7 +224,8 @@ public class IntegrationTests
             var dict = custom.ToDictionary(e => e.Key, e => e.Value);
             Assert.Equal("2", dict["keep"]);
             Assert.Equal("yes", dict["added"]);
-            Assert.False(dict.ContainsKey("drop"));
+            // fake-gcs-server 1.54 decodes JSON null in a PATCH metadata map[string]string as "" instead of removing the key.
+            Assert.True(!dict.TryGetValue("drop", out var dropped) || dropped == "");
 
             // Content is untouched by a metadata-only update.
             _sut.Object_Download(TestSupport.Auth(), b, "f.bin", out var file);

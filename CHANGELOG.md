@@ -4,6 +4,29 @@ All notable changes to the **Google Cloud Storage Connector for ODC** are docume
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-11-02
+
+Hardening release from an independent review of 1.7.0: transient errors on copies and deletes are retried safely, metadata edits no longer rewrite the whole object, and no server-side setting can redirect storage traffic any more. No action, input or output changed.
+
+### Security
+
+- **The `GCSCONNECTOR_EMULATOR_HOST` switch is gone.** That environment variable redirected all storage traffic to an unauthenticated emulator. The connector now reads no environment variable or setting for it; the tests use an internal seam that only the test assembly can reach.
+
+### Fixed
+
+- **`Object_UpdateMetadata` sends a PATCH instead of a PUT**, with only the changed fields and the same generation and metageneration preconditions. A full PUT without the object's ACL could reset per-object ACLs on fine-grained buckets. Removed custom metadata keys are sent as `null`.
+- **`Object_Copy` and `Object_Move` no longer guess which side is missing when the check fails.** After a 404, the source is checked again: only a 404 on that check means the source is missing. Any other failure (403, timeout, 5xx) gives a message naming both the source object and the destination bucket.
+- **Empty or whitespace-only names** for buckets and objects are rejected by every action before any request, naming the parameter. Google's client-side validation errors no longer read "Google Cloud Storage error (0 0)".
+- Network interruptions and download checksum mismatches (`IOException`) get readable messages, and identity-provider errors no longer end with a double period.
+
+### Changed
+
+- **Transient errors are retried where it is safe.** `Object_DeleteByPrefix` deletes each object only if it is still the generation it listed, so Google's client retries transient failures; an object replaced (412) or deleted (404) after the listing is skipped and not counted. `Object_Copy` and `Object_Move` copies are retried too (a move's copy is pinned to the source generation). `Object_Delete` is unchanged: without a generation a delete is not idempotent, so the caller retries.
+
+### Documentation
+
+- Bucket naming rules (underscores and dots are allowed), the 1,000-entry page limit and folder entries counting towards `MaxResults`, Object Versioning and soft delete on deletes, gzip-encoded objects downloaded decompressed, and the project structure.
+
 ## [1.7.0] - 2026-10-28
 
 Security and reliability release: credential isolation for Workload Identity Federation, a hardened token endpoint, safer `Object_Move` / `Object_UpdateMetadata`, and clear errors where ODC's platform limits used to cut actions off. No action, input or output changed.
@@ -146,6 +169,7 @@ New object-listing, folder-navigation, and signed-URL capabilities, plus more ac
 
 - **`Object_List` signature changed.** It gained required inputs (`MaxResults`, `PageToken`, `Delimiter`) and outputs (`NextPageToken`, `PrefixList`). Apps that consume `Object_List` in Service Studio must remap the action after upgrading. All other changes are backward-compatible — the new `ContentType` on `Object_GetSignedUrl` is optional.
 
+[1.7.1]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.7.1
 [1.7.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.7.0
 [1.6.1]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.6.1
 [1.6.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.6.0

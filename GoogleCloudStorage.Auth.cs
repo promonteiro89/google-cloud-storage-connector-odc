@@ -731,6 +731,7 @@ public partial class GoogleCloudStorage
                         continue;
 
                     string statusText = error ?? response.StatusCode.ToString();
+                    if (detail.EndsWith('.')) detail = detail[..^1];
                     throw new IdentityProviderException($"The identity provider rejected the client-credentials token request ({(int)response.StatusCode} {statusText}): {detail}. Check TokenEndpoint, ClientId, ClientSecret, and Scope/Audience.");
                 }
             }
