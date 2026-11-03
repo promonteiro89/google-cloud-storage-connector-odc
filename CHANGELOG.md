@@ -23,6 +23,12 @@ Hardening release from an independent review of 1.7.0: transient errors on copie
 
 - **Transient errors are retried where it is safe.** `Object_DeleteByPrefix` deletes each object only if it is still the generation it listed, so Google's client retries transient failures; an object replaced (412) or deleted (404) after the listing is skipped and not counted. `Object_Copy` and `Object_Move` copies are retried too (a move's copy is pinned to the source generation). `Object_Delete` is unchanged: without a generation a delete is not idempotent, so the caller retries.
 
+### Dependencies
+
+- **Refreshed the Google client libraries:** `Google.Apis` / `Google.Apis.Auth` / `Google.Apis.Core` `1.77.0` → **`1.78.0`**, `Google.Apis.Storage.v1` `1.77.0.4290` → **`1.77.0.4299`**, and `Google.Api.Gax` / `Google.Api.Gax.Rest` `4.15.1` → **`4.15.2`**. `Google.Cloud.Storage.V1` stays at `5.0.0` (the latest).
+- **`OutSystems.ExternalLibraries.SDK` `1.5.0` → `1.7.0`.** It is used at build time only and is not shipped in the zip; the zip has the same files as 1.7.0.
+- Test packages: `Microsoft.NET.Test.Sdk` `18.11.0`, `xunit` `2.9.3`, `xunit.runner.visualstudio` `4.0.1`, `Xunit.SkippableFact` `1.5.85`.
+
 ### Documentation
 
 - Bucket naming rules (underscores and dots are allowed), the 1,000-entry page limit and folder entries counting towards `MaxResults`, Object Versioning and soft delete on deletes, gzip-encoded objects downloaded decompressed, and the project structure.
