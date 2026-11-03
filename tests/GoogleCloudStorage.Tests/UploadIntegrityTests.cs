@@ -20,15 +20,15 @@ public sealed class UploadIntegrityTests : IDisposable
 
     public UploadIntegrityTests()
     {
-        _savedEmulatorHost = Environment.GetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST");
-        Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", null);
+        _savedEmulatorHost = Connector.EmulatorBaseUri;
+        Connector.EmulatorBaseUri = null;
         Connector.HttpClientFactoryOverride = new FakeHttpClientFactory(_backend);
     }
 
     public void Dispose()
     {
         Connector.HttpClientFactoryOverride = null;
-        Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", _savedEmulatorHost);
+        Connector.EmulatorBaseUri = _savedEmulatorHost;
     }
 
     // The HTTP seam is wired into the federated client, so drive the upload through that method.

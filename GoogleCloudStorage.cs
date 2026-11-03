@@ -26,8 +26,8 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Object_Upload(Authentication authentication, string bucketName, string objectName, File file, IEnumerable<MetadataEntry> metadata)
     {
-        Require(bucketName, "BucketName", isBucket: true);
-        Require(objectName, "ObjectName", isBucket: false);
+        Require(bucketName, "BucketName");
+        Require(objectName, "ObjectName");
 
         var storageClient = GetStorageClient(authentication);
         try
@@ -48,8 +48,8 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Object_Download(Authentication authentication, string bucketName, string objectName, out File file)
     {
-        Require(bucketName, "BucketName", isBucket: true);
-        Require(objectName, "ObjectName", isBucket: false);
+        Require(bucketName, "BucketName");
+        Require(objectName, "ObjectName");
 
         var storageClient = GetStorageClient(authentication);
         try
@@ -74,7 +74,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Object_List(Authentication authentication, string bucketName, string prefix, int maxResults, string pageToken, string delimiter, out IEnumerable<Object> objects, out string nextPageToken, out IEnumerable<Prefix> prefixList)
     {
-        Require(bucketName, "BucketName", isBucket: true);
+        Require(bucketName, "BucketName");
 
         var objectResults = new List<Object>();
         var prefixResults = new List<Prefix>();
@@ -135,8 +135,8 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Object_Exists(Authentication authentication, string bucketName, string objectName, out bool exists)
     {
-        Require(bucketName, "BucketName", isBucket: true);
-        Require(objectName, "ObjectName", isBucket: false);
+        Require(bucketName, "BucketName");
+        Require(objectName, "ObjectName");
 
         var storageClient = GetStorageClient(authentication);
         try
@@ -153,8 +153,8 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Object_GetMetadata(Authentication authentication, string bucketName, string objectName, out bool exists, out ObjectMetadata metadata, out IEnumerable<MetadataEntry> customMetadata)
     {
-        Require(bucketName, "BucketName", isBucket: true);
-        Require(objectName, "ObjectName", isBucket: false);
+        Require(bucketName, "BucketName");
+        Require(objectName, "ObjectName");
 
         var storageClient = GetStorageClient(authentication);
         exists = false;
@@ -203,8 +203,8 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Object_Delete(Authentication authentication, string bucketName, string objectName)
     {
-        Require(bucketName, "BucketName", isBucket: true);
-        Require(objectName, "ObjectName", isBucket: false);
+        Require(bucketName, "BucketName");
+        Require(objectName, "ObjectName");
 
         var storageClient = GetStorageClient(authentication);
         try
@@ -216,15 +216,16 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Object_Copy(Authentication authentication, string sourceBucketName, string sourceObjectName, string destinationBucketName, string destinationObjectName)
     {
-        Require(sourceBucketName, "SourceBucketName", isBucket: true);
-        Require(sourceObjectName, "SourceObjectName", isBucket: false);
-        Require(destinationBucketName, "DestinationBucketName", isBucket: true);
-        Require(destinationObjectName, "DestinationObjectName", isBucket: false);
+        Require(sourceBucketName, "SourceBucketName");
+        Require(sourceObjectName, "SourceObjectName");
+        Require(destinationBucketName, "DestinationBucketName");
+        Require(destinationObjectName, "DestinationObjectName");
 
         var storageClient = GetStorageClient(authentication);
         try
         {
-            storageClient.CopyObject(sourceBucketName, sourceObjectName, destinationBucketName, destinationObjectName);
+            storageClient.CopyObject(sourceBucketName, sourceObjectName, destinationBucketName, destinationObjectName,
+                new CopyObjectOptions { RetryOptions = RetryOptions.IdempotentRetryOptions });
         }
         catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
         {
@@ -235,10 +236,10 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Object_Move(Authentication authentication, string sourceBucketName, string sourceObjectName, string destinationBucketName, string destinationObjectName)
     {
-        Require(sourceBucketName, "SourceBucketName", isBucket: true);
-        Require(sourceObjectName, "SourceObjectName", isBucket: false);
-        Require(destinationBucketName, "DestinationBucketName", isBucket: true);
-        Require(destinationObjectName, "DestinationObjectName", isBucket: false);
+        Require(sourceBucketName, "SourceBucketName");
+        Require(sourceObjectName, "SourceObjectName");
+        Require(destinationBucketName, "DestinationBucketName");
+        Require(destinationObjectName, "DestinationObjectName");
 
         // Copying an object onto itself and then deleting the source would destroy the only copy.
         if (string.Equals(sourceBucketName, destinationBucketName, StringComparison.Ordinal)
@@ -260,7 +261,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         try
         {
             storageClient.CopyObject(sourceBucketName, sourceObjectName, destinationBucketName, destinationObjectName,
-                new CopyObjectOptions { IfSourceGenerationMatch = generation });
+                new CopyObjectOptions { IfSourceGenerationMatch = generation, RetryOptions = RetryOptions.IdempotentRetryOptions });
         }
         catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.PreconditionFailed)
         {
@@ -296,8 +297,8 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Object_UpdateMetadata(Authentication authentication, string bucketName, string objectName, string contentType, string contentEncoding, string contentDisposition, string cacheControl, IEnumerable<MetadataEntry> metadata)
     {
-        Require(bucketName, "BucketName", isBucket: true);
-        Require(objectName, "ObjectName", isBucket: false);
+        Require(bucketName, "BucketName");
+        Require(objectName, "ObjectName");
 
         var changes = ToMetadataDictionary(metadata);
         bool hasFieldChange = !string.IsNullOrEmpty(contentType) || !string.IsNullOrEmpty(contentEncoding)
@@ -309,32 +310,37 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
         try
         {
-            // Read-modify-write: fetch the current object, apply only the provided changes, and
-            // write it back guarded by preconditions so a concurrent change or content replacement
-            // fails cleanly (412) instead of being silently overwritten.
+            // Fetch the current object to get its generation and metageneration preconditions, then send
+            // a PATCH containing only the changed fields so untouched properties and ACLs are never sent back.
             var obj = storageClient.GetObject(bucketName, objectName);
 
-            if (!string.IsNullOrEmpty(contentType)) obj.ContentType = contentType;
-            if (!string.IsNullOrEmpty(contentEncoding)) obj.ContentEncoding = contentEncoding;
-            if (!string.IsNullOrEmpty(contentDisposition)) obj.ContentDisposition = contentDisposition;
-            if (!string.IsNullOrEmpty(cacheControl)) obj.CacheControl = cacheControl;
+            var patch = new Google.Apis.Storage.v1.Data.Object
+            {
+                Bucket = bucketName,
+                Name = objectName
+            };
+            if (!string.IsNullOrEmpty(contentType)) patch.ContentType = contentType;
+            if (!string.IsNullOrEmpty(contentEncoding)) patch.ContentEncoding = contentEncoding;
+            if (!string.IsNullOrEmpty(contentDisposition)) patch.ContentDisposition = contentDisposition;
+            if (!string.IsNullOrEmpty(cacheControl)) patch.CacheControl = cacheControl;
 
             if (changes != null)
             {
-                var merged = obj.Metadata != null ? new Dictionary<string, string>(obj.Metadata) : new Dictionary<string, string>();
+                var patchMetadata = new Dictionary<string, string>();
                 foreach (var kv in changes)
                 {
-                    if (kv.Value.Length == 0) merged.Remove(kv.Key);
-                    else merged[kv.Key] = kv.Value;
+                    // In a GCS JSON PATCH, a null dictionary value removes that custom metadata key;
+                    // null! satisfies IDictionary<string, string> while serializing as JSON null.
+                    patchMetadata[kv.Key] = kv.Value.Length == 0 ? null! : kv.Value;
                 }
-                obj.Metadata = merged;
+                patch.Metadata = patchMetadata;
             }
 
             try
             {
                 // Setting any precondition turns off the SDK's automatic ones, so both are explicit: the
                 // generation guards against a content replacement (which resets metageneration to 1).
-                storageClient.UpdateObject(obj, new UpdateObjectOptions { IfGenerationMatch = obj.Generation, IfMetagenerationMatch = obj.Metageneration });
+                storageClient.PatchObject(patch, new PatchObjectOptions { IfGenerationMatch = obj.Generation, IfMetagenerationMatch = obj.Metageneration });
             }
             catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.PreconditionFailed)
             {
@@ -346,7 +352,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Object_DeleteByPrefix(Authentication authentication, string bucketName, string prefix, out long deletedCount)
     {
-        Require(bucketName, "BucketName", isBucket: true);
+        Require(bucketName, "BucketName");
 
         deletedCount = 0;
         var stopwatch = Stopwatch.StartNew();
@@ -355,37 +361,38 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
         var storageClient = GetStorageClient(authentication);
 
-        // Materialize the names first so deletions can't interfere with listing pagination.
-        var names = new List<string>();
+        // Materialize the (Name, Generation) pairs first so deletions can't interfere with listing pagination,
+        // and each delete carries a generation precondition (which makes the SDK retry transient failures).
+        var targets = new List<(string Name, long? Generation)>();
         try
         {
             foreach (var obj in storageClient.ListObjects(bucketName, prefix))
-                names.Add(obj.Name);
+                targets.Add((obj.Name, obj.Generation));
         }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, null); }
 
         long deleted = 0;
-        foreach (var name in names)
+        foreach (var (name, generation) in targets)
         {
             // One call may not finish the work: stop before ODC kills the action and report where it
             // stopped, so the caller can resume with the same prefix.
             if (stopwatch.Elapsed >= DeleteByPrefixBudget)
-                throw new Exception($"Deleted {deleted} of {names.Count} objects under prefix '{prefix}' before the {DeleteByPrefixBudget.TotalSeconds:0}-second time budget of one call ran out (ODC limits an action to 95 seconds). Nothing was rolled back; call Object_DeleteByPrefix again with the same prefix to delete the rest.");
+                throw new Exception($"Deleted {deleted} of {targets.Count} objects under prefix '{prefix}' before the {DeleteByPrefixBudget.TotalSeconds:0}-second time budget of one call ran out (ODC limits an action to 95 seconds). Nothing was rolled back; call Object_DeleteByPrefix again with the same prefix to delete the rest.");
 
             try
             {
-                storageClient.DeleteObject(bucketName, name);
+                storageClient.DeleteObject(bucketName, name, new DeleteObjectOptions { IfGenerationMatch = generation });
                 deleted++;
             }
-            catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
+            catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound || e.HttpStatusCode == HttpStatusCode.PreconditionFailed)
             {
-                // Already gone (deleted concurrently) - the desired state is reached, keep going.
+                // Already gone (404) or replaced since listing (412) - skip without counting and keep going.
             }
             catch (Exception e) when (IsTranslatable(e))
             {
                 // TranslateException gives the same message a whole-object call would give, so the
                 // partial-progress error carries an actionable cause instead of Google's raw text.
-                throw new Exception($"Deleted {deleted} of {names.Count} objects under prefix '{prefix}', then failed on '{name}': {TranslateException(e, authentication, bucketName, name).Message}", e);
+                throw new Exception($"Deleted {deleted} of {targets.Count} objects under prefix '{prefix}', then failed on '{name}': {TranslateException(e, authentication, bucketName, name).Message}", e);
             }
         }
 
@@ -394,8 +401,8 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Object_GetSignedUrl(Authentication authentication, string bucketName, string objectName, int expirationMinutes, out string url, string operation = "Download", string contentType = "")
     {
-        Require(bucketName, "BucketName", isBucket: true);
-        Require(objectName, "ObjectName", isBucket: false);
+        Require(bucketName, "BucketName");
+        Require(objectName, "ObjectName");
 
         if (expirationMinutes <= 0)
             throw new ArgumentException($"ExpirationMinutes must be greater than zero (received {expirationMinutes}).");
@@ -460,7 +467,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Bucket_Create(Authentication authentication, string bucketName, string location)
     {
-        Require(bucketName, "BucketName", isBucket: true);
+        Require(bucketName, "BucketName");
 
         var storageClient = GetStorageClient(authentication);
         try
@@ -479,7 +486,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Bucket_Delete(Authentication authentication, string bucketName)
     {
-        Require(bucketName, "BucketName", isBucket: true);
+        Require(bucketName, "BucketName");
 
         var storageClient = GetStorageClient(authentication);
         try
@@ -491,7 +498,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Bucket_Exists(Authentication authentication, string bucketName, out bool exists)
     {
-        Require(bucketName, "BucketName", isBucket: true);
+        Require(bucketName, "BucketName");
 
         var storageClient = GetStorageClient(authentication);
         try
@@ -509,29 +516,36 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     // ---- Helpers ---------------------------------------------------------------------
 
     /// <summary>
-    /// Rejects an empty required name before any client is created, so a missing input fails with
-    /// an actionable message and never reaches the network. Bucket names reject whitespace-only
-    /// values; object names reject only null/empty (spaces are legal in object names).
+    /// Rejects an empty or whitespace-only required name before any client is created, so a missing
+    /// input fails with an actionable message and never reaches the network.
     /// </summary>
-    private static void Require(string? value, string name, bool isBucket)
+    private static void Require(string? value, string name)
     {
-        if (isBucket ? string.IsNullOrWhiteSpace(value) : string.IsNullOrEmpty(value))
+        if (string.IsNullOrWhiteSpace(value))
             throw new ArgumentException($"{name} cannot be empty.");
     }
 
     /// <summary>
     /// A 404 from a copy (an object rewrite) means either the source object or the destination bucket
-    /// is missing, and the message wording differs between Google and emulators. Asks again whether
-    /// the source exists and names whichever side is missing.
+    /// is missing, and the message wording differs between Google and emulators. Probes the source:
+    /// if the source exists, the destination bucket is missing; if the probe returns 404, the source
+    /// is missing; if the probe fails any other way, reports both candidates and the probe error.
     /// </summary>
     private static Exception CopyNotFoundException(StorageClient storageClient, Google.GoogleApiException e, Authentication authentication, string sourceBucketName, string sourceObjectName, string destinationBucketName)
     {
-        bool sourceExists = true;
-        try { storageClient.GetObject(sourceBucketName, sourceObjectName); }
-        catch (Exception probe) when (IsTranslatable(probe)) { sourceExists = false; }
-        return sourceExists
-            ? FriendlyException(e, authentication, destinationBucketName, null)
-            : FriendlyException(e, authentication, sourceBucketName, sourceObjectName);
+        try
+        {
+            storageClient.GetObject(sourceBucketName, sourceObjectName);
+            return FriendlyException(e, authentication, destinationBucketName, null);
+        }
+        catch (Google.GoogleApiException probe) when (probe.HttpStatusCode == HttpStatusCode.NotFound)
+        {
+            return FriendlyException(probe, authentication, sourceBucketName, sourceObjectName);
+        }
+        catch (Exception probe) when (IsTranslatable(probe))
+        {
+            return new Exception($"The copy from '{sourceBucketName}/{sourceObjectName}' failed with 404: either that source object or the destination bucket '{destinationBucketName}' does not exist, and checking the source failed: {TranslateException(probe, authentication, sourceBucketName, sourceObjectName).Message}", e);
+        }
     }
 
     /// <summary>
@@ -633,21 +647,22 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     /// <summary>
     /// True for every exception type the actions translate into an actionable message: a Google API
-    /// error, a token-endpoint failure, a subject-token failure, an identity provider failure, or
-    /// the network/timeout failures of a request to Google.
+    /// error, a token-endpoint failure, a subject-token failure, an identity provider failure, an
+    /// I/O or download-checksum failure, or the network/timeout failures of a request to Google.
     /// </summary>
     internal static bool IsTranslatable(Exception e) =>
         e is Google.GoogleApiException
         || e is TokenResponseException
         || e is Google.Apis.Auth.OAuth2.SubjectTokenException
         || e is IdentityProviderException
+        || e is IOException
         || e is HttpRequestException
         || e is TaskCanceledException;
 
     /// <summary>
     /// Single exception translator for all actions: keeps the per-status Google storage messages,
     /// unwraps the SDK's SubjectTokenException (which would otherwise hide the identity provider's
-    /// actionable message), and adds clear messages for network and timeout failures. The original
+    /// actionable message), and adds clear messages for I/O, network and timeout failures. The original
     /// exception is kept as the InnerException.
     /// </summary>
     internal static Exception TranslateException(Exception e, Authentication authentication, string? bucketName, string? objectName)
@@ -667,8 +682,13 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
                 return new Exception($"Workload Identity Federation could not obtain the identity provider token: {InnermostMessage(e)}", e);
             case IdentityProviderException:
                 return new Exception(e.Message, e);
+            case IOException io when io.Message != null && io.Message.StartsWith("Incorrect hash", StringComparison.Ordinal):
+                // In Google.Cloud.Storage.V1 5.0, a download CRC32C mismatch throws an IOException starting with "Incorrect hash:".
+                return new Exception($"The downloaded data did not match the object's checksum, so no content was returned. This is usually a transient network error - retry the download. Details: {e.Message}", e);
+            case IOException:
+                return new Exception($"The connection to Google Cloud was interrupted: {InnermostMessage(e).TrimEnd('.')}. Retry the request.", e);
             case HttpRequestException:
-                return new Exception($"Could not reach Google Cloud: {InnermostMessage(e)} Check the outbound HTTPS access to *.googleapis.com.", e);
+                return new Exception($"Could not reach Google Cloud: {InnermostMessage(e).TrimEnd('.')}. Check the outbound HTTPS access to *.googleapis.com.", e);
             default:
                 // Actions take no CancellationToken, so a TaskCanceledException is a request timeout.
                 return new Exception($"The request to Google Cloud timed out (no response within {StorageRequestTimeout.TotalSeconds:0} seconds). Retry the action; for large files use Object_GetSignedUrl and let the client transfer the file directly.", e);
@@ -708,6 +728,8 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     {
         string details = e.Error != null && !string.IsNullOrEmpty(e.Error.Message) ? e.Error.Message : e.Message;
 
+        if ((int)e.HttpStatusCode == 0)
+            return new Exception($"The request was rejected before it was sent to Google Cloud Storage because an input is invalid: {details}", e);
         if (e.HttpStatusCode == HttpStatusCode.NotFound && bucketName != null)
         {
             if (objectName != null && !IsBucketNotFound(e))

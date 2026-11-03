@@ -3,17 +3,18 @@ using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using Xunit;
+using Connector = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.GoogleCloudStorage;
 
 namespace GoogleCloudStorage.Tests;
 
 /// <summary>
 /// Boots a local <c>fake-gcs-server</c> (an in-memory Google Cloud Storage emulator) and points
-/// the connector at it via the <c>GCSCONNECTOR_EMULATOR_HOST</c> environment variable — the same
-/// hook the connector honors, which is never set on a real ODC server. No Google account, no
+/// the connector at it through its internal <c>EmulatorBaseUri</c> test seam, which only this test
+/// assembly can set: the connector reads no environment variable for it. No Google account, no
 /// credentials, and no Docker required.
 ///
 /// Resolution order for the emulator:
-///   1. If <c>GCSCONNECTOR_EMULATOR_HOST</c> is already set, use that running server as-is.
+///   1. If <c>FAKE_GCS_HOST</c> is set (e.g. <c>127.0.0.1:4443</c>), use that running server as-is.
 ///   2. If <c>FAKE_GCS_EXE</c> points at a binary, run it.
 ///   3. Otherwise download the binary for this OS/arch from the official GitHub releases and run it.
 ///
@@ -23,10 +24,11 @@ namespace GoogleCloudStorage.Tests;
 public sealed class EmulatorFixture : IAsyncLifetime
 {
     private const string Version = "1.54.0";
-    private const string EnvVar = "GCSCONNECTOR_EMULATOR_HOST";
+    /// <summary>Test-only variable naming an already running emulator; read by this fixture, never by the connector.</summary>
+    private const string ExternalHostVar = "FAKE_GCS_HOST";
 
     private Process? _process;
-    private bool _ownsEnvVar;
+    private bool _ownsSeam;
 
     public bool Available { get; private set; }
     public string SkipReason { get; private set; } = "Emulator not started.";
@@ -36,9 +38,11 @@ public sealed class EmulatorFixture : IAsyncLifetime
         try
         {
             // 1. Respect an externally provided emulator.
-            var external = Environment.GetEnvironmentVariable(EnvVar);
+            var external = Environment.GetEnvironmentVariable(ExternalHostVar);
             if (!string.IsNullOrEmpty(external))
             {
+                Connector.EmulatorBaseUri = external.Contains("://") ? external : "http://" + external;
+                _ownsSeam = true;
                 Available = true;
                 return;
             }
@@ -60,23 +64,23 @@ public sealed class EmulatorFixture : IAsyncLifetime
                 throw new TimeoutException($"fake-gcs-server did not start listening on port {port}.");
 
             // Must be set before the connector creates its first StorageClient.
-            Environment.SetEnvironmentVariable(EnvVar, $"127.0.0.1:{port}");
-            _ownsEnvVar = true;
+            Connector.EmulatorBaseUri = $"http://127.0.0.1:{port}";
+            _ownsSeam = true;
             Available = true;
         }
         catch (Exception ex)
         {
             Available = false;
             SkipReason = $"fake-gcs-server unavailable ({ex.GetType().Name}: {ex.Message}). " +
-                         "Integration tests skipped; run with network access, or set GCSCONNECTOR_EMULATOR_HOST / FAKE_GCS_EXE.";
+                         "Integration tests skipped; run with network access, or set FAKE_GCS_HOST / FAKE_GCS_EXE.";
             SafeKill();
         }
     }
 
     public Task DisposeAsync()
     {
-        if (_ownsEnvVar)
-            Environment.SetEnvironmentVariable(EnvVar, null);
+        if (_ownsSeam)
+            Connector.EmulatorBaseUri = null;
         SafeKill();
         return Task.CompletedTask;
     }

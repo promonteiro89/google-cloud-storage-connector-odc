@@ -215,8 +215,8 @@ public class RegressionTests
     [Fact]
     public void E11_UpdateMetadata_sends_generation_and_metageneration_preconditions_and_explains_a_412()
     {
-        var savedEmulatorHost = Environment.GetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST");
-        Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", null);
+        var savedEmulatorHost = Connector.EmulatorBaseUri;
+        Connector.EmulatorBaseUri = null;
         var backend = new FakeFederationBackend();
         var previousFactory = Connector.HttpClientFactoryOverride;
         Connector.HttpClientFactoryOverride = new FakeHttpClientFactory(backend);
@@ -230,7 +230,7 @@ public class RegressionTests
             var update = Assert.Single(backend.Requests, r =>
                 r.Method != HttpMethod.Get
                 && r.Uri.AbsolutePath.Contains("/storage/v1/b/test-bucket-alpha/o/", StringComparison.Ordinal));
-            Assert.Equal(HttpMethod.Put, update.Method);
+            Assert.Equal(HttpMethod.Patch, update.Method);
             var query = System.Web.HttpUtility.ParseQueryString(update.Uri.Query);
             Assert.Equal("100", query["ifGenerationMatch"]);
             Assert.Equal("7", query["ifMetagenerationMatch"]);
@@ -245,7 +245,7 @@ public class RegressionTests
         finally
         {
             Connector.HttpClientFactoryOverride = previousFactory;
-            Environment.SetEnvironmentVariable("GCSCONNECTOR_EMULATOR_HOST", savedEmulatorHost);
+            Connector.EmulatorBaseUri = savedEmulatorHost;
         }
     }
 

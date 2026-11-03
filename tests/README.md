@@ -7,7 +7,7 @@ The tests run the real connector through its `IGoogleCloudStorage` interface, ex
 ## How it works
 
 - **Offline tests** (signed URLs, input validation, client caching) need no server at all. V4 URL signing is local RSA cryptography, performed with a throwaway 2048-bit key generated in-memory on first run — so there is nothing to install and no secret to manage.
-- **Integration tests** run the connector against [fake-gcs-server](https://github.com/fsouza/fake-gcs-server), a local in-memory Google Cloud Storage emulator, via the connector's `GCSCONNECTOR_EMULATOR_HOST` hook (which it honors only when that variable is set — it is never set on a real ODC server, where the connector always talks to production GCS).
+- **Integration tests** run the connector against [fake-gcs-server](https://github.com/fsouza/fake-gcs-server), a local in-memory Google Cloud Storage emulator, via the connector's internal `EmulatorBaseUri` test seam. Only this test assembly can set it (`InternalsVisibleTo`); the connector reads no environment variable or setting for it, so a real ODC server always talks to production GCS.
 
 The test fixture starts the emulator automatically. If it cannot (e.g. no network and no cached binary), the integration tests **skip** rather than fail, so the offline tests still give a green run on any machine.
 
@@ -23,7 +23,7 @@ dotnet test --filter "FullyQualifiedName~OfflineTests"
 
 ### Pointing at your own emulator
 
-- Set `GCSCONNECTOR_EMULATOR_HOST` (e.g. `127.0.0.1:4443`) and the fixture uses that running server instead of downloading one.
+- Set `FAKE_GCS_HOST` (e.g. `127.0.0.1:4443`) and the fixture uses that running server instead of downloading one. Only the test fixture reads this variable; the connector does not.
 - Set `FAKE_GCS_EXE` to an existing `fake-gcs-server` binary to skip the download.
 - Set `FAKE_GCS_DIR` to control where the downloaded binary is cached (default: the system temp dir).
 
@@ -47,6 +47,7 @@ Prerequisites: the .NET 10 SDK, and `tar` on `PATH` (bundled with macOS, Linux, 
 | Upload integrity | Uploads send `x-goog-hash: crc32c=…` matching an independent CRC32C of the exact bytes (reference value checked against RFC 3720), the bytes are stored unchanged, and data corrupted in transit is rejected with a friendly "nothing was stored, retry" error |
 | Auth method switch | Empty/explicit/case-insensitive `ServiceAccountKey`, invalid method, missing-field messages for both methods, provider formats, https-only token endpoint |
 | Federation protocol (contract) | Client-credentials request, RFC 8693 STS exchange, service account impersonation, Storage called with the short-lived token, supplied `SubjectToken`, `client_secret_basic` fallback, and friendly errors for a rejected client, a non-JWT token, an STS rejection, or a missing Token Creator role |
+| Safety (offline, 1.7.1) | Empty or whitespace names make **no request**; status-0 SDK validation message; Move sends `ifSourceGenerationMatch` and `ifGenerationMatch` and handles 412/404 on copy and delete; `DeleteByPrefix` deletes with each listed generation, skips a 412 and is retried after a 503; the copy-404 probe names the right side (403 on the probe gives the neutral message); `UpdateMetadata` sends a PATCH with only the changed fields and `null` for removed keys; the production caches are capped at 500 and a supplied token's entry expires at its `exp`; download checksum and connection `IOException` messages |
 | Federation hardening | Each supplied token gets its own exchange (never another caller's), expired tokens rejected before any request (30 s skew), cache expiry at the token's `exp`; JWT `exp` parsing edge cases; token endpoint: user info rejected and never echoed, loopback `http` only in tests, redirects not followed, no raw bodies or query strings in messages (checked on the whole exception chain), timeouts reported as such, client-credentials lifetime capped at the JWT's `exp` |
 | Federation live (CI only) | Real Google Cloud via GitHub OIDC: the federated identity is accepted by Storage, and the signed URL's signature verifies against the service account's published certificate (the verifier itself is proven offline) |
 
