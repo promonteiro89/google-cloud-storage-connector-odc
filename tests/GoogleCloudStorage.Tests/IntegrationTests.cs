@@ -2,7 +2,7 @@ using System.Text;
 using OutSystems.ExternalLibraries.GoogleCloudStorage_Connector;
 using Xunit;
 using Connector = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.GoogleCloudStorage;
-using GcsFile = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.File;
+using GcsFile = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.BinaryContent;
 using MetadataEntry = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.MetadataEntry;
 
 namespace GoogleCloudStorage.Tests;
@@ -30,7 +30,7 @@ public class IntegrationTests
     }
 
     private void Upload(string bucket, string name, byte[] content, string contentType, IEnumerable<MetadataEntry>? metadata = null) =>
-        _sut.Object_Upload(TestSupport.Auth(), bucket, name, new GcsFile { Content = content, ContentType = contentType }, metadata ?? []);
+        _sut.Object_UploadBinary(TestSupport.Auth(), bucket, name, new GcsFile { Content = content, ContentType = contentType }, metadata ?? []);
 
     private void Cleanup(string bucket)
     {
@@ -101,20 +101,20 @@ public class IntegrationTests
             Upload(b, "img/photo.png", photo, "image/png");
             Upload(b, unicodeName, Encoding.UTF8.GetBytes("pdf-ish"), "application/pdf");
 
-            _sut.Object_Download(TestSupport.Auth(), b, "root.txt", out var text);
+            _sut.Object_DownloadBinary(TestSupport.Auth(), b, "root.txt", out var text);
             Assert.Equal("root content", Encoding.UTF8.GetString(text.Content));
             Assert.Equal("text/plain", text.ContentType);
 
-            _sut.Object_Download(TestSupport.Auth(), b, "img/photo.png", out var bin);
+            _sut.Object_DownloadBinary(TestSupport.Auth(), b, "img/photo.png", out var bin);
             Assert.Equal(photo, bin.Content);
 
-            _sut.Object_Download(TestSupport.Auth(), b, "empty.bin", out var empty);
+            _sut.Object_DownloadBinary(TestSupport.Auth(), b, "empty.bin", out var empty);
             Assert.Empty(empty.Content);
 
-            _sut.Object_Download(TestSupport.Auth(), b, "big.bin", out var large);
+            _sut.Object_DownloadBinary(TestSupport.Auth(), b, "big.bin", out var large);
             Assert.Equal(big, large.Content);
 
-            _sut.Object_Download(TestSupport.Auth(), b, unicodeName, out var uni);
+            _sut.Object_DownloadBinary(TestSupport.Auth(), b, unicodeName, out var uni);
             Assert.Equal("pdf-ish", Encoding.UTF8.GetString(uni.Content));
         }
         finally { Cleanup(b); }
@@ -228,7 +228,7 @@ public class IntegrationTests
             Assert.True(!dict.TryGetValue("drop", out var dropped) || dropped == "");
 
             // Content is untouched by a metadata-only update.
-            _sut.Object_Download(TestSupport.Auth(), b, "f.bin", out var file);
+            _sut.Object_DownloadBinary(TestSupport.Auth(), b, "f.bin", out var file);
             Assert.Equal(original, file.Content);
         }
         finally { Cleanup(b); }
@@ -357,7 +357,7 @@ public class IntegrationTests
             _sut.Object_Copy(TestSupport.Auth(), src, "docs/a.txt", dst, "copied/a.txt");
             _sut.Object_Exists(TestSupport.Auth(), src, "docs/a.txt", out var srcKept);
             _sut.Object_Exists(TestSupport.Auth(), dst, "copied/a.txt", out var copyThere);
-            _sut.Object_Download(TestSupport.Auth(), dst, "copied/a.txt", out var copied);
+            _sut.Object_DownloadBinary(TestSupport.Auth(), dst, "copied/a.txt", out var copied);
             Assert.True(srcKept);
             Assert.True(copyThere);
             Assert.Equal("content A", Encoding.UTF8.GetString(copied.Content));
@@ -391,10 +391,10 @@ public class IntegrationTests
             Upload(b, "keep.txt", Encoding.UTF8.GetBytes("x"), "text/plain");
 
             Assert.ThrowsAny<Exception>(() =>
-                _sut.Object_Download(TestSupport.Auth(), b, "does-not-exist.txt", out _));
+                _sut.Object_DownloadBinary(TestSupport.Auth(), b, "does-not-exist.txt", out _));
 
             Assert.ThrowsAny<Exception>(() =>
-                _sut.Object_Upload(TestSupport.Auth(), "no-such-bucket-" + Guid.NewGuid().ToString("N")[..8], "f.txt", new GcsFile { Content = [1], ContentType = "text/plain" }, []));
+                _sut.Object_UploadBinary(TestSupport.Auth(), "no-such-bucket-" + Guid.NewGuid().ToString("N")[..8], "f.txt", new GcsFile { Content = [1], ContentType = "text/plain" }, []));
 
             Assert.ThrowsAny<Exception>(() =>
                 _sut.Bucket_Delete(TestSupport.Auth(), b)); // non-empty
@@ -417,7 +417,7 @@ public class IntegrationTests
                 _sut.Object_Move(TestSupport.Auth(), b, "same.txt", b, "same.txt"));
             Assert.Contains("same object", ex.Message);
 
-            _sut.Object_Download(TestSupport.Auth(), b, "same.txt", out var file);
+            _sut.Object_DownloadBinary(TestSupport.Auth(), b, "same.txt", out var file);
             Assert.Equal("keep me", Encoding.UTF8.GetString(file.Content));
         }
         finally { Cleanup(b); }
@@ -503,7 +503,7 @@ public class IntegrationTests
             Upload(b, "over-cap.bin", tooBig, "application/octet-stream");
 
             var ex = Assert.ThrowsAny<Exception>(() =>
-                _sut.Object_Download(TestSupport.Auth(), b, "over-cap.bin", out _));
+                _sut.Object_DownloadBinary(TestSupport.Auth(), b, "over-cap.bin", out _));
             Assert.Contains("Object_GetSignedUrl", ex.Message);
             Assert.Contains("larger than", ex.Message);
 
@@ -511,7 +511,7 @@ public class IntegrationTests
             new Random(12).NextBytes(exact);
             Upload(b, "at-cap.bin", exact, "application/octet-stream");
 
-            _sut.Object_Download(TestSupport.Auth(), b, "at-cap.bin", out var file);
+            _sut.Object_DownloadBinary(TestSupport.Auth(), b, "at-cap.bin", out var file);
             Assert.Equal(exact, file.Content);
         }
         finally { Cleanup(b); }
@@ -524,20 +524,20 @@ public class IntegrationTests
         var b = NewBucket();
         try
         {
-            _sut.Object_Upload(TestSupport.Auth(), b, "null-content.bin",
+            _sut.Object_UploadBinary(TestSupport.Auth(), b, "null-content.bin",
                 new GcsFile { Content = null!, ContentType = "application/octet-stream" }, []);
 
             _sut.Object_GetMetadata(TestSupport.Auth(), b, "null-content.bin", out var exists, out var md, out _);
             Assert.True(exists);
             Assert.Equal(0, md.Size);
 
-            _sut.Object_Download(TestSupport.Auth(), b, "null-content.bin", out var empty);
+            _sut.Object_DownloadBinary(TestSupport.Auth(), b, "null-content.bin", out var empty);
             Assert.Empty(empty.Content);
 
-            _sut.Object_Upload(TestSupport.Auth(), b, "no-type.txt",
+            _sut.Object_UploadBinary(TestSupport.Auth(), b, "no-type.txt",
                 new GcsFile { Content = Encoding.UTF8.GetBytes("x"), ContentType = "" }, []);
 
-            _sut.Object_Download(TestSupport.Auth(), b, "no-type.txt", out var file);
+            _sut.Object_DownloadBinary(TestSupport.Auth(), b, "no-type.txt", out var file);
             Assert.Equal("x", Encoding.UTF8.GetString(file.Content));
             Assert.NotNull(file.ContentType);
         }
@@ -565,9 +565,9 @@ public class IntegrationTests
         var b = NewBucket();
         try
         {
-            _sut.Object_Upload(TestSupport.Auth(), b, "plain-1.txt",
+            _sut.Object_UploadBinary(TestSupport.Auth(), b, "plain-1.txt",
                 new GcsFile { Content = Encoding.UTF8.GetBytes("1"), ContentType = "" }, []);
-            _sut.Object_Upload(TestSupport.Auth(), b, "plain-2.txt",
+            _sut.Object_UploadBinary(TestSupport.Auth(), b, "plain-2.txt",
                 new GcsFile { Content = Encoding.UTF8.GetBytes("2"), ContentType = "" }, []);
 
             _sut.Object_List(TestSupport.Auth(), b, "plain-", 0, "", "", out var objects, out _, out _);

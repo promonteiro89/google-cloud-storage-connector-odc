@@ -81,6 +81,19 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
     public Func<HttpRequestMessage, HttpResponseMessage?>? StorageResponseOverride { get; set; }
 
     private readonly Dictionary<string, (string Bucket, string Name)> _uploadSessions = new();
+    private readonly Dictionary<string, MemoryStream> _uploadBuffers = new();
+
+    /// <summary>The number of PUT requests (chunks) each completed upload took, by "bucket/name".</summary>
+    public Dictionary<string, int> UploadChunkCounts { get; } = new();
+
+    /// <summary>Content types the upload endpoint received in each session's metadata, by "bucket/name".</summary>
+    public Dictionary<string, string?> UploadedContentTypes { get; } = new();
+
+    /// <summary>When set, the next N upload PUTs answer this status (then the upload proceeds normally).</summary>
+    public (HttpStatusCode Status, int Times)? FailUploadPuts { get; set; }
+
+    /// <summary>When set, the next N upload session starts (POST) answer this status.</summary>
+    public (HttpStatusCode Status, int Times)? FailUploadStarts { get; set; }
 
     public IEnumerable<Recorded> To(string hostOrPathFragment) =>
         Requests.Where(r => r.Uri.ToString().Contains(hostOrPathFragment, StringComparison.Ordinal));
@@ -345,11 +358,21 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
     {
         if (request.Method == HttpMethod.Post)
         {
+            if (FailUploadStarts is { Times: > 0 } failingStart)
+            {
+                FailUploadStarts = failingStart.Times > 1 ? (failingStart.Status, failingStart.Times - 1) : null;
+                return Json(failingStart.Status, new { error = new { code = (int)failingStart.Status, message = "Injected upload start failure" } });
+            }
             var bucket = request.RequestUri!.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries)[4];
             using var meta = JsonDocument.Parse(content);
             var name = meta.RootElement.GetProperty("name").GetString()!;
             var session = Guid.NewGuid().ToString("N");
-            lock (_uploadSessions) _uploadSessions[session] = (bucket, name);
+            lock (_uploadSessions)
+            {
+                _uploadSessions[session] = (bucket, name);
+                _uploadBuffers[session] = new MemoryStream();
+                UploadedContentTypes[$"{bucket}/{name}"] = meta.RootElement.TryGetProperty("contentType", out var ct) ? ct.GetString() : null;
+            }
             var started = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("") };
             started.Headers.Location = new Uri($"https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o?uploadType=resumable&upload_id={session}");
             return started;
@@ -359,7 +382,37 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
         (string Bucket, string Name) target;
         lock (_uploadSessions) target = _uploadSessions[uploadId];
 
-        byte[] received = (byte[])content.Clone();
+        if (FailUploadPuts is { Times: > 0 } failing)
+        {
+            FailUploadPuts = failing.Times > 1 ? (failing.Status, failing.Times - 1) : null;
+            return Json(failing.Status, new { error = new { code = (int)failing.Status, message = "Injected upload failure" } });
+        }
+
+        // A chunk of a multi-request upload carries "Content-Range: bytes a-b/*"; the last one names the total.
+        // Like Google, answer 308 with the range received so far until the last chunk arrives.
+        MemoryStream buffer;
+        lock (_uploadSessions) buffer = _uploadBuffers[uploadId];
+        var range = request.Content?.Headers.ContentRange;
+        if (range != null && !range.HasRange && content.Length == 0)
+        {
+            // A status query ("Content-Range: bytes */*" with no body) after an interrupted chunk: say what arrived.
+            var status = new HttpResponseMessage((HttpStatusCode)308) { Content = new StringContent("") };
+            if (buffer.Length > 0) status.Headers.TryAddWithoutValidation("Range", $"bytes=0-{buffer.Length - 1}");
+            return status;
+        }
+        if (range != null && range.HasRange && range.From != buffer.Length)
+            return Json(HttpStatusCode.BadRequest, new { error = new { code = 400, message = $"Chunk starts at {range.From}, expected {buffer.Length}" } });
+        buffer.Write(content);
+        string chunkKey = $"{target.Bucket}/{target.Name}";
+        lock (UploadChunkCounts) UploadChunkCounts[chunkKey] = UploadChunkCounts.GetValueOrDefault(chunkKey) + 1;
+        if (range != null && !range.HasLength)
+        {
+            var incomplete = new HttpResponseMessage((HttpStatusCode)308) { Content = new StringContent("") };
+            incomplete.Headers.TryAddWithoutValidation("Range", $"bytes=0-{buffer.Length - 1}");
+            return incomplete;
+        }
+
+        byte[] received = buffer.ToArray();
         if (CorruptUploadInTransit && received.Length > 0) received[received.Length / 2] ^= 0x01;
         string calculated = Crc32c.Base64(received);
 

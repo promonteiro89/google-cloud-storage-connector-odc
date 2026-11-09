@@ -42,9 +42,10 @@ The connector is architected as an **adapter**. It bridges the OutSystems Develo
 - **Keyless authentication:** Workload Identity Federation (Google's recommended method for workloads outside Google Cloud) works with any OIDC identity provider, server-to-server. Service account keys remain supported as a legacy fallback. See [Authentication](#authentication).
 - **Cached, thread-safe clients:** `StorageClient` and `UrlSigner` instances are cached per credential (keyed by a SHA-256 hash of every credential field, never the raw secret; the two methods never share an entry, and each supplied `SubjectToken` gets its own entry) and reused across requests. This avoids re-parsing the RSA private key and allocating a new `HttpClient` on every call — both types are thread-safe, so sharing them is safe under high concurrency and prevents socket exhaustion. The caches are bounded (500 entries each, least recently used first) and an entry expires after 60 minutes without use, or when the supplied token it was built from expires.
 - **Actionable errors:** every action translates failures into clear, actionable messages: missing bucket vs. object, access denied, unauthenticated, bucket-not-empty, credential mismatch, identity provider errors, network failures and timeouts. The original exception is preserved as the inner exception for diagnostics. Messages never contain secrets, token endpoint credentials or query strings, or raw identity provider responses.
-- **Within ODC's platform limits:** every request to Google, including the token exchange, impersonation and URL-signing calls, times out after 80 seconds (below ODC's 95-second action limit), `Object_Download` refuses objects over ODC's 5.5 MB payload limit, and `Object_DeleteByPrefix` stops after 75 seconds and reports its progress, so the connector's own message reaches the app instead of a platform timeout.
+- **Within ODC's platform limits:** every request to Google, including the token exchange, impersonation and URL-signing calls, times out after 80 seconds (below ODC's 95-second action limit), `Object_Upload` and `Object_Download` stream ODC Files and stop after 85 seconds, `Object_DownloadBinary` refuses objects over ODC's 5.5 MB payload limit, and `Object_DeleteByPrefix` stops after 75 seconds and reports its progress, so the connector's own message reaches the app instead of a platform timeout.
 - **Safe retries:** transient Google errors (408, 429, 5xx) and network errors are retried where a retry cannot change the outcome: uploads and downloads (up to 3 attempts), deletes, copies and metadata updates (each guarded by the object's generation).
-- **End-to-end upload integrity:** `Object_Upload` sends the CRC32C checksum of the exact bytes with the upload (Google.Cloud.Storage.V1 5.x). If anything changes the data in transit, Google rejects the upload before storing it, so a corrupted object is never created and an existing object is never overwritten with bad data.
+- **Safe error messages:** object names, prefixes and other inputs, and Google's or the identity provider's error text, are cleaned before they go into an error message. Line breaks and invisible text-direction characters become spaces, so a crafted name cannot forge or reorder lines in the ODC error log. A `ClientSecret` that the identity provider echoes back, plain or URL-encoded, is masked.
+- **End-to-end upload integrity:** `Object_Upload` and `Object_UploadBinary` send the CRC32C checksum of the exact bytes with the upload (Google.Cloud.Storage.V1 5.x). If anything changes the data in transit, Google rejects the upload before storing it, so a corrupted object is never created and an existing object is never overwritten with bad data.
 - **V4 Signed URLs:** Offloads large file data transfers directly to the client browser, bypassing the ODC server to optimize memory and bandwidth.
 - **Resource Embedding:** Branded icons are embedded directly into the assembly to provide a premium integrated experience in Service Studio.
 
@@ -72,7 +73,7 @@ dotnet build GoogleCloudStorage.csproj -c Release
 dotnet publish GoogleCloudStorage.csproj -c Release -f net10.0 --no-self-contained
 ```
 
-After publishing, zip the contents of `bin/Release/net10.0/publish/` (**excluding** `OutSystems.ExternalLibraries.SDK.dll` and the `.pdb`), keeping its `runtimes/` folder, and upload the zip to the ODC Portal. See [Build and Deployment](#build-and-deployment).
+After publishing, zip the contents of `bin/Release/net10.0/publish/` (**excluding** the `.pdb`, and **keeping** `OutSystems.ExternalLibraries.SDK.dll`), keeping its `runtimes/` folder, and upload the zip to the ODC Portal. See [Build and Deployment](#build-and-deployment).
 
 ---
 
@@ -164,7 +165,11 @@ Then set `WorkloadIdentityProvider` to `//iam.googleapis.com/projects/$PROJECT_N
 ### Object Operations
 
 #### `Object_Upload`
-Persists a file to a specific GCS bucket, optionally with custom metadata. A `ContentType` containing a line break is rejected before anything is sent. Transient errors (408, 429, 5xx, network) are retried, up to 3 attempts in total.
+Uploads an ODC **File** (from an Upload widget, an entity attribute or another action) to a bucket, optionally with custom metadata. The content streams from ODC storage to Google in 32 MB chunks, so it never passes through the action's 5.5 MB payload limit; ODC Files go up to 2 GB.
+
+- **Time is the limit.** One upload may run for 85 seconds, retries included, within ODC's 95-second action limit; a slower one stops with an error, and nothing is stored. Measured on ODC: 200 MB took about 10 s to a bucket in a nearby region and 22 s to one on another continent. Keep the bucket in or near your ODC region, and use `Object_GetSignedUrl` (Operation `Upload`) for files too large to send in that time.
+- **Retries:** transient errors (408, 429, 5xx, network) are retried. An interrupted chunk is resent, and a failed start reopens the File, up to 3 attempts in total.
+- **Content type:** a `ContentType` containing a line break is rejected before anything is sent.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -172,13 +177,19 @@ Persists a file to a specific GCS bucket, optionally with custom metadata. A `Co
 | `authentication` | `Authentication` | GCP credentials |
 | `bucketName` | `Text` | Destination bucket |
 | `objectName` | `Text` | Full path/filename in the bucket |
-| `file` | `File` | Structure containing Binary Content and ContentType |
+| `file` | `File` | The ODC File to upload |
+| `contentType` | `Text` | Optional MIME type to store. Empty = the File's own MIME type. |
 | `metadata` | `List of MetadataEntry` | Optional custom key-value metadata to store with the object (e.g. tenant, document type). Retrievable via `Object_GetMetadata`. Leave empty for none. |
 
-> **Integrity check:** the upload carries a CRC32C checksum of `file.Content`. If the data Google receives doesn't match, the upload fails with an "Upload rejected by Google Cloud Storage … retry the upload" error, nothing is stored, and any existing object with that name is left unchanged.
+> **Integrity check:** the upload carries a CRC32C checksum of the bytes sent. If the data Google receives doesn't match, the upload fails with an "Upload rejected by Google Cloud Storage … retry the upload" error, nothing is stored, and any existing object with that name is left unchanged.
 
 #### `Object_Download`
-Retrieves a file and its metadata from GCS. Objects stored with `Content-Encoding: gzip` are returned **decompressed**, so `Content` can be larger than the stored `Size`. Objects larger than **5.5 MB** (ODC's payload limit for an action) are refused with an error pointing to `Object_GetSignedUrl`; download those directly from Google with a signed URL. Transient errors (408, 429, 5xx, network) are retried, up to 3 attempts in total.
+Downloads an object into a new ODC **File**, streaming it from Google into ODC storage and checking Google's CRC32C. Objects up to 2 GB can be downloaded, the most an ODC File can hold; a larger object is refused before anything is transferred.
+
+- **Name and type:** the File is named after the last part of the object name (`reports/2026/q1.pdf` gives `q1.pdf`), with the object's content type.
+- **Temporary File:** the returned File is temporary, so save it to an entity attribute to keep it; ODC deletes an unsaved one after a short while. To hand it to the browser, use ODC's `GetFileSignedURL`, or the Download node in a screen action.
+- **gzip:** objects stored with `Content-Encoding: gzip` arrive **decompressed**.
+- **Limits:** the same 85-second limit and retries as `Object_Upload` apply.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -190,7 +201,42 @@ Retrieves a file and its metadata from GCS. Objects stored with `Content-Encodin
 **Outputs:**
 | Output | Type | Description |
 |--------|------|-------------|
-| `file` | `File` | Structure containing Binary Content and system ContentType |
+| `file` | `File` | The downloaded File (temporary until saved to an entity) |
+
+#### `Object_UploadBinary`
+Uploads content held in memory (`BinaryContent`: Binary Data and a content type) to a bucket, optionally with custom metadata.
+
+- **When to use it:** for content your app builds in memory (a generated PDF, a CSV, a REST response). ODC app logic cannot turn Binary Data into a File, so use this action for that content, and use it on **ODC Self-Hosted**, which has no File type. Otherwise prefer `Object_Upload`.
+- **Size limit:** ODC limits an action's input to 5.5 MB.
+- **Same behaviour as `Object_Upload`:** the CRC32C integrity check, the retries and the line-break check apply.
+
+**Arguments:**
+| Argument | Type | Description |
+|----------|------|-------------|
+| `authentication` | `Authentication` | GCP credentials |
+| `bucketName` | `Text` | Destination bucket |
+| `objectName` | `Text` | Full path/filename in the bucket |
+| `content` | `BinaryContent` | The content and its MIME type |
+| `metadata` | `List of MetadataEntry` | Optional custom key-value metadata, as in `Object_Upload` |
+
+#### `Object_DownloadBinary`
+Downloads an object into memory as Binary Data, with its content type.
+
+- **Size limit:** objects larger than **5.5 MB**, ODC's payload limit for an action, are refused with an error pointing to `Object_Download` and `Object_GetSignedUrl`.
+- **gzip:** objects stored with `Content-Encoding: gzip` are returned **decompressed**, so `Content` can be larger than the stored `Size`.
+- **Retries:** transient errors are retried, up to 3 attempts in total.
+
+**Arguments:**
+| Argument | Type | Description |
+|----------|------|-------------|
+| `authentication` | `Authentication` | GCP credentials |
+| `bucketName` | `Text` | Source bucket |
+| `objectName` | `Text` | Full path/filename in the bucket |
+
+**Outputs:**
+| Output | Type | Description |
+|--------|------|-------------|
+| `content` | `BinaryContent` | The content and its MIME type |
 
 #### `Object_List`
 Lists objects in a bucket, optionally filtered by prefix, with support for pagination (`MaxResults`/`PageToken`) and folder-style navigation (`Delimiter`).
@@ -249,7 +295,7 @@ Retrieves an object's full metadata (size, content type, hashes, generation, sto
 | `customMetadata` | `List of MetadataEntry` | The object's custom key-value metadata. Empty when the object has none or does not exist. |
 
 #### `Object_Delete`
-Deletes an object from a bucket. On a bucket with **Object Versioning** or **soft delete** enabled, Google keeps a noncurrent or soft-deleted copy that can be restored (and is billed) until it expires; on other buckets the object is gone. The connector reads the object's generation first and deletes only that generation, so transient errors are retried automatically and an object replaced in the meantime is never deleted (the action then reports it). With a role that may delete but not read objects, it falls back to an unguarded delete, which is not retried.
+Deletes an object from a bucket. On a bucket with **Object Versioning** or **soft delete** enabled, Google keeps a noncurrent or soft-deleted copy that can be restored (and is billed) until it expires; on other buckets the object is gone. The connector reads the object's generation first and deletes only that generation, so transient errors are retried and an object replaced in the meantime is never deleted (the action then reports it). The connector repeats the request itself. If Google applied the first delete but its answer was lost, the repeat finds the object gone or replaced, and the action reports success without touching a newer object. With a role that may delete but not read objects, it falls back to an unguarded delete, which is not retried.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -285,7 +331,7 @@ Moves an object to another location (copy + delete of the source), within the sa
 > **Note:** Move is copy-then-delete and is not atomic. Both steps are guarded by the source's generation: if another request replaces the source during the move, nothing is lost. The move either reports that nothing was moved, or that both objects exist and the source holds newer data. If the copy succeeds but the source can't be deleted, the action reports explicitly that both objects now exist. A missing destination bucket and a missing source object are reported as such.
 
 #### `Object_UpdateMetadata`
-Changes an object's content headers and custom metadata **without re-uploading its content**. Only the fields you provide change: empty text inputs are left untouched, and an empty `metadata` list leaves custom metadata untouched. Within `metadata`, an entry with an empty `Value` **removes** that key. A call with nothing to update is rejected. The write is guarded by generation and metageneration preconditions, so a concurrent metadata update, or a replacement of the object's content, makes the call fail cleanly ("changed by another request … retry") instead of being silently overwritten.
+Changes an object's content headers and custom metadata **without re-uploading its content**. Only the fields you provide change: empty text inputs are left untouched, and an empty `metadata` list leaves custom metadata untouched. Within `metadata`, an entry with an empty `Value` **removes** that key. A call with nothing to update is rejected. The write is guarded by generation and metageneration preconditions, so a concurrent metadata update, or a replacement of the object's content, makes the call fail cleanly ("changed by another request … retry") instead of being silently overwritten. If the request had to be sent again after a network error and the repeat finds the object changed, the first request may have been applied, so the message says to read the metadata with `Object_GetMetadata` before retrying.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -401,8 +447,8 @@ Google Cloud credentials for either method (see [Authentication](#authentication
 - `ClientEmail`, `PrivateKey`: Text (ServiceAccountKey only)
 - `WorkloadIdentityProvider`, `ServiceAccountEmail`, `TokenEndpoint`, `ClientId`, `ClientSecret`, `Scope`, `Audience`, `SubjectToken`: Text (WorkloadIdentityFederation only)
 
-### `File`
-Used for binary data exchange.
+### `BinaryContent`
+Content held in memory, used by `Object_UploadBinary` and `Object_DownloadBinary`. Called `File` before 2.0.0; renamed so it is not confused with ODC's File data type.
 - `Content`: Binary Data
 - `ContentType`: Text (MIME type)
 
@@ -425,7 +471,7 @@ A folder-style entry returned by `Object_List` when `Delimiter` is set — a com
 - `Value`: Text (e.g., `images/thumbnails/`)
 
 ### `MetadataEntry`
-A single custom metadata key-value pair stored with an object. Used by `Object_Upload` (input), `Object_GetMetadata` (output), and `Object_UpdateMetadata` (input).
+A single custom metadata key-value pair stored with an object. Used by `Object_Upload` and `Object_UploadBinary` (input), `Object_GetMetadata` (output), and `Object_UpdateMetadata` (input).
 - `Key`: Text (e.g., `tenant`, `documentType`)
 - `Value`: Text (an empty `Value` removes the key in `Object_UpdateMetadata`)
 
@@ -464,7 +510,7 @@ GoogleCloudStorage_ODC/
 │   └── action_icon.png         # Action-level icon
 └── Structures/                 # ODC-compatible structs
     ├── Authentication.cs       # Credential model
-    ├── File.cs                 # Binary wrapper
+    ├── BinaryContent.cs        # In-memory content (Binary actions)
     ├── Bucket.cs               # Container metadata
     ├── Object.cs               # File metadata (list entry)
     ├── ObjectMetadata.cs       # Full object metadata
@@ -478,7 +524,7 @@ tests/GoogleCloudStorage.Tests/ # xUnit suite: offline, emulator, federation con
 ## Build and Deployment
 
 1. **Publish:** Run `dotnet publish` as shown in Quick Start. The output is in `bin/Release/net10.0/publish/`.
-2. **Clean:** Delete `OutSystems.ExternalLibraries.SDK.dll` (ODC provides it) and the `.pdb` from that folder.
+2. **Clean:** Delete the `.pdb` from that folder. **Keep `OutSystems.ExternalLibraries.SDK.dll`:** since 2.0.0 the File actions need it, and ODC rejects the library without it ("IOSFile could not be found").
 3. **Zip:** Compress the folder's contents, not the folder itself: the DLLs and `.deps.json` at the root of the zip, plus the `runtimes/` folder that `dotnet publish` produces (a dependency of `Google.Apis.Auth`).
 4. **Deploy:** Upload to ODC Portal > External Logic.
 
@@ -496,6 +542,7 @@ dotnet test --filter "FullyQualifiedName~OfflineTests"   # offline only, no netw
 - **Offline tests** (signed URLs, validation, caching) use a throwaway in-memory RSA key — V4 signing is local cryptography.
 - **Integration tests** run the connector against [fake-gcs-server](https://github.com/fsouza/fake-gcs-server) via the connector's internal `EmulatorBaseUri` test seam, which only the test assembly can set; no environment variable or setting can redirect the connector's storage traffic, so a real ODC server always talks to production GCS. The test fixture starts the emulator automatically and skips (rather than fails) if it can't. See [`tests/README.md`](tests/README.md) for details.
 - **Upload integrity tests** check that uploads carry the CRC32C of the exact bytes and that data corrupted in transit is rejected with a clear error, against an in-process fake of Google's resumable-upload endpoint.
+- **File transfer tests** stream ODC Files through an in-memory fake of ODC's file storage and the fake of Google: chunked uploads, resumed and retried transfers, the 2 GB check, the 85-second deadline and storage failures.
 - **Federation contract tests** drive the full Workload Identity Federation chain (identity provider → Google STS → impersonation → Storage / `signBlob`) against an in-process fake, asserting the exact requests on every hop.
 - **Live federation tests** (CI only) run keyless against **real Google Cloud**. GitHub Actions' own OIDC token acts as the identity provider, so no secrets exist anywhere. They verify Google accepts the federated identity and that signed URLs verify against the service account's published certificate.
 
@@ -504,7 +551,8 @@ dotnet test --filter "FullyQualifiedName~OfflineTests"   # offline only, no netw
 ## Best Practices
 
 - **Security:** Mark `PrivateKey` as a **Secret** App Setting in ODC to ensure it is encrypted and masked in logs.
-- **Large files:** ODC caps custom code input and output at 5.5 MB, so for files over ~5 MB use `Object_GetSignedUrl` and let the client transfer the file directly with Google. `Object_Download` refuses larger objects with that advice. Large `Object_List` results count toward the same limit: page them with `MaxResults` / `NextPageToken`.
+- **Large files:** use `Object_Upload` / `Object_Download` with ODC Files: they stream outside ODC's 5.5 MB payload limit, up to 2 GB or what transfers in 85 seconds (about 1 GB to a bucket near your ODC region). Start very large transfers from a Timer or a Workflow rather than a screen, where ODC limits a server call to 60 seconds. Beyond that, use `Object_GetSignedUrl` and let the client transfer the file directly with Google. Large `Object_List` results count toward the 5.5 MB limit: page them with `MaxResults` / `NextPageToken`.
+- **Bucket location:** keep the bucket in or near your ODC tenant's region. On ODC, an upload to a bucket on another continent was 2 to 3 times slower.
 - **Naming:** Bucket names use lowercase letters, digits, hyphens (`-`), underscores (`_`) and dots (`.`), start and end with a letter or digit, and are 3–63 characters long (up to 222 with dots, each dot-separated part at most 63). See Google's [bucket naming rules](https://cloud.google.com/storage/docs/buckets#naming).
 - **Tag your objects:** Use the `metadata` input on `Object_Upload` (or `Object_UpdateMetadata` later) to attach business context — tenant, owner, document type — that you can read back cheaply with `Object_GetMetadata` without downloading the file.
 - **Edit metadata in place:** Use `Object_UpdateMetadata` to fix a `ContentType` or relabel objects without re-uploading their content; it is precondition-guarded, so concurrent edits fail cleanly.

@@ -5,7 +5,7 @@ using OutSystems.ExternalLibraries.GoogleCloudStorage_Connector;
 using Xunit;
 using Authentication = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.Authentication;
 using Connector = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.GoogleCloudStorage;
-using GcsFile = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.File;
+using GcsFile = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.BinaryContent;
 
 namespace GoogleCloudStorage.Tests;
 
@@ -97,11 +97,11 @@ public class RegressionTests
     public void O7_required_names_are_rejected_by_object_and_bucket_actions()
     {
         var upload = Assert.Throws<ArgumentException>(() =>
-            _sut.Object_Upload(TestSupport.Auth(), "", "o.txt", new GcsFile { Content = [1], ContentType = "text/plain" }, []));
+            _sut.Object_UploadBinary(TestSupport.Auth(), "", "o.txt", new GcsFile { Content = [1], ContentType = "text/plain" }, []));
         Assert.Contains("BucketName", upload.Message);
 
         var download = Assert.Throws<ArgumentException>(() =>
-            _sut.Object_Download(TestSupport.Auth(), "test-bucket", "", out _));
+            _sut.Object_DownloadBinary(TestSupport.Auth(), "test-bucket", "", out _));
         Assert.Contains("ObjectName", download.Message);
 
         var copy = Assert.Throws<ArgumentException>(() =>

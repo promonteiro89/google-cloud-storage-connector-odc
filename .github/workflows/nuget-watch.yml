@@ -72,7 +72,7 @@ jobs:
           1. Bump the matching \`<PackageReference ... Version=\"...\" />\` in \`GoogleCloudStorage.csproj\`.
           2. \`dotnet build GoogleCloudStorage.csproj -c Release\` and \`dotnet test\` - all checks must pass.
           3. Open a PR (CI runs the suite) and merge once green.
-          4. Publish, zip the \`publish/\` output (excluding \`OutSystems.ExternalLibraries.SDK.dll\`), and cut a release for the ODC Portal.
+          4. Publish, zip the \`publish/\` output (excluding the \`.pdb\`, keeping \`OutSystems.ExternalLibraries.SDK.dll\`), and cut a release for the ODC Portal.
 
           Release notes: https://github.com/googleapis/google-cloud-dotnet/releases"
 

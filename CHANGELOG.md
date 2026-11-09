@@ -4,6 +4,92 @@ All notable changes to the **Google Cloud Storage Connector for ODC** are docume
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-11-09
+
+Fixes from the four reviews of the O11 connector's 1.7.3, checked against this connector. No action, input or output changes: a drop-in replacement for 2.0.0.
+
+### Fixed
+
+- **`Object_Delete` reported "nothing was deleted" after a delete that had worked.** When Google applied a delete but its answer was lost, the repeated request answered 412, or 404 if the object was gone, and the action reported a failure. The connector now repeats the delete itself, with the Storage library's retry off, and treats a 412 or 404 on a repeat as deleted. A newer object written meanwhile is never touched. A 412 on the first request still reports that the object was replaced and nothing was deleted.
+- **`Object_UpdateMetadata` said "nothing was changed" when only a repeat got a 412.** The first request may have been applied, so the message now says the update "may already have been applied" and asks to read the metadata before retrying.
+- **`Object_Move` reported a failed source delete when only a repeat got a 412.** In that case the source was in fact deleted, so the move now succeeds.
+- **Error messages could forge lines in the ODC error log.** Object names, prefixes, `Operation`, `AuthenticationMethod` and Google's error text went into messages unchanged. They are now cleaned: line breaks, other control characters and invisible text-direction characters (such as U+202E) become spaces, and each value is cut at 500 characters.
+- **A URL-encoded `ClientSecret` was not masked.** If the identity provider echoed the secret back URL-encoded, it appeared in the error. Plain and URL-encoded forms are now masked.
+- **The identity provider connection kept cookies.** It is shared by every app that uses the library, so a cookie the provider set for one app's request went with another's. Cookies are now off.
+- **A token request could take about 120 seconds.** The 30-second limit applied separately to the headers and the body of each request, and the HTTP Basic retry doubled it. That passed ODC's 95-second action limit, so ODC killed the action without the connector's message. One 30-second deadline now covers the whole exchange.
+- **A plain "Not Found" from an emulator or a proxy turned a missing bucket into a missing object** in `Object_Delete`, `Object_Download`, `Object_DownloadBinary`, `Object_UpdateMetadata`, `Object_Move` and `Object_Copy`. As `Object_Exists` and `Object_GetMetadata` already did, an unclear 404 is now settled by looking up the bucket.
+
+### Tests
+
+- 201 tests (186 in 2.0.0).
+- **New tests:**
+  - a repeated delete answered 412 (the newer object stays) or 404;
+  - three 503s on a delete (exactly three requests);
+  - the two `Object_UpdateMetadata` 412 messages;
+  - a repeated `Object_Move` source delete;
+  - a log-forging object name, `Operation` and Google error text;
+  - a URL-encoded secret, in both encodings;
+  - the identity provider client's settings;
+  - one deadline across both client-authentication attempts;
+  - an unclear 404 on five actions, settled either way.
+- **Each fix is proven:** breaking the resend tracking, the message cleaning, the encoded-secret masking, the cookie setting, the bucket check or the shared deadline makes a test fail.
+
+## [2.0.0] - 2026-11-09
+
+`Object_Upload` and `Object_Download` now work with ODC's **File** data type, so files are no longer limited by ODC's 5.5 MB action payload: they stream between ODC storage and Google, up to 2 GB. The Binary Data behaviour of 1.x stays available under new names. This is a breaking release: apps must update their calls (see **Migrating from 1.x**).
+
+### Breaking changes
+
+- **`Object_Upload` takes an ODC File** (from an Upload widget, an entity attribute or another action) and a new optional `ContentType` input. Empty means the File's own type.
+- **`Object_Download` returns an ODC File.** The File is named after the last part of the object name and is temporary until the app saves it to an entity attribute.
+- **The 1.x actions are renamed:** the in-memory versions are now `Object_UploadBinary` and `Object_DownloadBinary`, with the same 5.5 MB limit.
+- **The `File` structure is renamed `BinaryContent`,** so it is no longer confused with ODC's File type in ODC Studio.
+
+### Added
+
+- **Large files through the connector.** On an ODC tenant:
+  - **Uploads:** 200 MB took about 10 s to a bucket in a nearby region, and 22 s to one on another continent. 1 GB took 40 s to a nearby bucket.
+  - **Downloads:** 200 MB took about 13 s.
+  - **Integrity:** the content matched byte for byte in every run.
+- **Uploads use 32 MB chunks.** Google confirms each chunk before the next one is sent, so larger chunks mean fewer waits. On ODC this was 1.4 to 2 times faster than the SDK's 10 MB default. Each upload holds one chunk in memory.
+- **A clear error before ODC's 95-second limit.** A File upload or download that has not finished after 85 seconds, retries included, stops with a message, and nothing is stored. A download larger than 2 GB, the most an ODC File holds, is refused before any transfer. Both messages point to `Object_GetSignedUrl` for larger files.
+- **Retries:**
+  - an interrupted upload chunk is resent;
+  - a failed upload start reopens the File and tries again;
+  - downloads retry transient errors (408, 429, 5xx, network) as before, up to 3 attempts.
+- **Download integrity:** downloads into a File check Google's CRC32C, as `Object_DownloadBinary` does.
+
+### Packaging
+
+- **The release zip now includes `OutSystems.ExternalLibraries.SDK.dll`.** ODC rejects a library with File parameters without it ("IOSFile could not be found", OS-ELGW-40004). The README and the NuGet-update instructions say so. The new dependency `OutSystems.ExternalLibraries.SDK.FileStorage` 1.2.1 is also in the zip.
+
+### Migrating from 1.x
+
+1. **Upload widget or entity File:** replace the 1.x `Object_Upload` call with the new `Object_Upload` and pass the File. There is no need to read its content into Binary Data first.
+2. **Content built in memory** (generated PDFs, CSVs, REST responses), **or ODC Self-Hosted** (which has no File type): call `Object_UploadBinary` / `Object_DownloadBinary`, and rename the `File` structure to `BinaryContent` in your logic.
+3. **Downloads:** either keep the content in memory with `Object_DownloadBinary`, or switch to `Object_Download` and save the returned File to an entity, or hand it to the browser with ODC's `GetFileSignedURL`.
+
+### Known limits
+
+- **Browser uploads need a signed-in user.** ODC rejects an anonymous upload to a File with 401.
+- **Long transfers started from a screen:** ODC limits the server call to 60 seconds, so start very large transfers from a Timer or a Workflow.
+- **ODC Self-Hosted:** untested. File doesn't exist there, so the File actions can't be used, and whether ODC Self-Hosted accepts a library that declares them is not yet verified.
+
+### Tests
+
+- 186 tests (169 in 1.7.2). The offline fake of Google now handles uploads sent in several chunks and resumed after a failure. A new in-memory fake of ODC's file storage covers:
+  - chunked uploads;
+  - the content-type override;
+  - an empty File;
+  - resumed and retried uploads;
+  - the 85-second deadline both ways;
+  - an ODC storage failure;
+  - downloads into a File;
+  - the 2 GB refusal;
+  - a missing object;
+  - File names.
+- Breaking the 2 GB check, the chunk size or the reopen-on-retry makes a test fail.
+
 ## [1.7.2] - 2026-11-09
 
 Hardening release from six independent reviews of 1.7.1 and a cross-check with the O11 connector: uploads, downloads and deletes survive transient Google errors, `Object_DeleteByPrefix` keeps to ODC's time limit on any prefix size, and identity-provider errors can no longer carry secrets into logs. No action, input or output changed.
@@ -211,6 +297,8 @@ New object-listing, folder-navigation, and signed-URL capabilities, plus more ac
 
 - **`Object_List` signature changed.** It gained required inputs (`MaxResults`, `PageToken`, `Delimiter`) and outputs (`NextPageToken`, `PrefixList`). Apps that consume `Object_List` in Service Studio must remap the action after upgrading. All other changes are backward-compatible — the new `ContentType` on `Object_GetSignedUrl` is optional.
 
+[2.0.1]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v2.0.1
+[2.0.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v2.0.0
 [1.7.2]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.7.2
 [1.7.1]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.7.1
 [1.7.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.7.0

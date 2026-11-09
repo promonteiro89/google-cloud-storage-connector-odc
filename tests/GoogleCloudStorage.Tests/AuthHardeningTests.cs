@@ -248,4 +248,88 @@ public sealed class AuthHardeningTests : IDisposable
         var credential = (ServiceAccountCredential)Invoke("GetServiceAccountCredential", UniqueKeyAuth(" test-sa@fake-project.iam.gserviceaccount.com\n"));
         Assert.Equal("test-sa@fake-project.iam.gserviceaccount.com", credential.Id);
     }
+
+    // ---- 2.0.0: findings from the O11 connector's 1.7.4 reviews ---------------------------
+
+    [Theory]
+    [InlineData("p@ss w/rd+1", "p%40ss%20w%2Frd%2B1")]   // as Uri.EscapeDataString encodes it (HTTP Basic)
+    [InlineData("p@ss w/rd+1", "p%40ss+w%2Frd%2B1")]     // as a form body encodes it (client_secret_post)
+    public void E6_A_url_encoded_client_secret_echoed_by_the_provider_is_masked(string secret, string echoed)
+    {
+        var auth = ClientCredentials();
+        auth.ClientSecret = secret;
+        _backend.IdpResponseOverride = _ => OAuthError("invalid_request", $"bad client_secret={echoed} here");
+
+        var e = Assert.ThrowsAny<Exception>(() => _sut.Object_Exists(auth, "test-bucket-alpha", "a.txt", out _));
+
+        Assert.DoesNotContain(echoed, e.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("w%2Frd", e.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("***", e.Message);
+    }
+
+    [Fact]
+    public void H1_The_production_identity_provider_client_keeps_no_cookies_and_follows_no_redirects()
+    {
+        // Private member, read by reflection: the production client is never used by the fakes.
+        var lazy = (Lazy<HttpClient>)typeof(Connector).GetField("IdentityProviderHttp", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+        var handler = (SocketsHttpHandler)typeof(HttpMessageInvoker).GetField("_handler", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(lazy.Value)!;
+
+        Assert.False(handler.UseCookies);
+        Assert.False(handler.AllowAutoRedirect);
+        Assert.Equal(Timeout.InfiniteTimeSpan, lazy.Value.Timeout);
+    }
+
+    [Fact]
+    public void T3_One_deadline_covers_both_client_authentication_attempts()
+    {
+        var saved = Connector.IdentityProviderDeadline;
+        Connector.IdentityProviderDeadline = TimeSpan.FromMilliseconds(1000);
+        try
+        {
+            int calls = 0;
+            _backend.IdpResponseOverride = _ =>
+            {
+                // The first attempt is rejected after 800 ms; the second never sends its body. One shared
+                // deadline ends the exchange at about 1 s; a fresh one per attempt would let it run to 1.8 s.
+                if (++calls == 1)
+                {
+                    Thread.Sleep(800);
+                    return Raw(HttpStatusCode.Unauthorized, "{\"error\":\"invalid_client\"}");
+                }
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new StallingStream()) };
+            };
+
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var e = Assert.ThrowsAny<Exception>(() => _sut.Object_Exists(ClientCredentials(), "test-bucket-alpha", "a.txt", out _));
+
+            Assert.Contains("did not respond within", e.Message);
+            Assert.Equal(2, calls);
+            Assert.True(watch.Elapsed < TimeSpan.FromMilliseconds(1500), $"Took {watch.Elapsed}; the deadline must cover both attempts.");
+        }
+        finally
+        {
+            Connector.IdentityProviderDeadline = saved;
+        }
+    }
+
+    /// <summary>A response body that never delivers a byte until the read is cancelled.</summary>
+    private sealed class StallingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+            return 0;
+        }
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct) => ReadAsync(buffer.AsMemory(offset, count), ct).AsTask();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 }
