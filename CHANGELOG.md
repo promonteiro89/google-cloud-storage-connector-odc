@@ -4,7 +4,7 @@ All notable changes to the **Google Cloud Storage Connector for ODC** are docume
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.7.2] - Unreleased
+## [1.7.2] - 2026-11-09
 
 Hardening release from six independent reviews of 1.7.1 and a cross-check with the O11 connector: uploads, downloads and deletes survive transient Google errors, `Object_DeleteByPrefix` keeps to ODC's time limit on any prefix size, and identity-provider errors can no longer carry secrets into logs. No action, input or output changed.
 
@@ -211,6 +211,7 @@ New object-listing, folder-navigation, and signed-URL capabilities, plus more ac
 
 - **`Object_List` signature changed.** It gained required inputs (`MaxResults`, `PageToken`, `Delimiter`) and outputs (`NextPageToken`, `PrefixList`). Apps that consume `Object_List` in Service Studio must remap the action after upgrading. All other changes are backward-compatible — the new `ContentType` on `Object_GetSignedUrl` is optional.
 
+[1.7.2]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.7.2
 [1.7.1]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.7.1
 [1.7.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.7.0
 [1.6.1]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.6.1
