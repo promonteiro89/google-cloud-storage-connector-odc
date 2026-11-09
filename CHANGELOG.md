@@ -4,6 +4,42 @@ All notable changes to the **Google Cloud Storage Connector for ODC** are docume
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.2] - 2026-11-09
+
+Hardening release from six independent reviews of 1.7.1 and a cross-check with the O11 connector: uploads, downloads and deletes survive transient Google errors, `Object_DeleteByPrefix` keeps to ODC's time limit on any prefix size, and identity-provider errors can no longer carry secrets into logs. No action, input or output changed.
+
+### Security
+
+- **Identity provider errors are sanitized.** The provider's `error` and `error_description` are cut to 300 characters, control characters become spaces (no forged log lines), and the `ClientSecret` is masked as `***` if the provider echoes it. Before, `error` had no length limit and the secret could reach ODC's logs.
+- **A malformed `TokenEndpoint` is never echoed.** A value without `https://` (such as `idp.example.com/token?client_secret=...` or `user:password@host/token`) was repeated whole in the error message. Only a real http(s) URL is shown now, without query or user information.
+- **The identity provider's response is limited to 1 MB.** A wrong `TokenEndpoint` pointing at a large file could fill the container's memory.
+- **The credential caches stay within 500 entries at all times.** The cap was only applied by the once-a-minute sweep, so a burst of distinct `SubjectToken`s could grow them far past it.
+
+### Fixed
+
+- **`Object_DeleteByPrefix` works page by page.** It listed every object under the prefix into memory before deleting, outside its 75-second budget, so a large prefix could hit ODC's 95-second limit with nothing deleted. It now lists 1,000 objects at a time and deletes each page before fetching the next, checks the budget before every request, and cancels a request still running at 88 seconds. The error now says "Deleted N objects" (the total is no longer known in advance).
+- **The 80-second timeout covers every call to Google.** The token exchange (STS), impersonation, URL signing (signBlob) and the service-account token request used .NET's default of 100 seconds, above ODC's 95-second limit.
+- **`Object_Exists` and `Object_GetMetadata` no longer depend on Google's wording** to tell a missing bucket from a missing object. An ambiguous 404 is settled by looking up the bucket: only a 404 on the bucket makes it an error (as documented); if the lookup is not allowed (Storage Object Admin cannot read buckets), the object is reported missing, as before.
+- **A download that timed out reported "One or more errors occurred."** The SDK's synchronous download wraps its failures in an `AggregateException`; the connector now unwraps it, so a timeout gives the connector's timeout message (and is not retried).
+- **`Bucket_Create` with a wrong `ProjectId`** reported "Bucket does not exist (names are case-sensitive)". It now names the project.
+- **`Object_Move`** blamed the destination bucket when the source was deleted and recreated during the move; it now reports that the source changed and that nothing was moved.
+- **`Object_GetSignedUrl` checks `Operation` before any network call**, so a typo such as `downloads` no longer surfaces as a federation error or timeout.
+- **`Object_Upload` rejects a `ContentType` with line breaks** with the same message as `Object_GetSignedUrl`, instead of a raw .NET `FormatException`.
+- `ProjectId` is required by `Bucket_List` and `Bucket_Create` (checked before any request) and trimmed; `ClientEmail` is trimmed for the service-account key method.
+
+### Changed
+
+- **Transient errors are retried on uploads, downloads and deletes.** `Object_Upload` and `Object_Download` retry 408, 429, 5xx and network errors (up to 3 attempts, none started after 40 seconds; a timeout, an oversized download or another 4xx is never retried). `Object_Delete` reads the object's generation first and deletes only that generation, so Google's client retries it safely; an object replaced in the meantime is not deleted and the action reports it. With a role that may delete but not read objects (the read answers 403), it falls back to the unguarded delete of 1.7.1, which is not retried.
+
+### Tests and CI
+
+- 169 tests (127 in 1.7.1). The offline fake of Google now behaves like the real service: deletes and copies answer 404/412, listings are paged, and downloads are served with Google's checksum headers, including gzip transcoding. New tests cover every change above, plus the DeleteByPrefix 404 skip, the copy and move retries and gzip downloads, which no test covered before. Each new safety check is proven by a deliberate break that makes a test fail.
+- CI fails when any non-live test is skipped (an emulator that failed to start used to pass as green), runs with read-only repository permissions, and pins every GitHub Action to a commit SHA.
+
+### Documentation
+
+- `Bucket_Exists` needs `storage.buckets.get`, which Storage Object Admin does not include. The DeleteByPrefix count can be slightly low when a retried delete had already succeeded. The retries and the `ProjectId` requirement are described per action.
+
 ## [1.7.1] - 2026-11-02
 
 Hardening release from an independent review of 1.7.0: transient errors on copies and deletes are retried safely, metadata edits no longer rewrite the whole object, and no server-side setting can redirect storage traffic any more. No action, input or output changed.
@@ -175,6 +211,7 @@ New object-listing, folder-navigation, and signed-URL capabilities, plus more ac
 
 - **`Object_List` signature changed.** It gained required inputs (`MaxResults`, `PageToken`, `Delimiter`) and outputs (`NextPageToken`, `PrefixList`). Apps that consume `Object_List` in Service Studio must remap the action after upgrading. All other changes are backward-compatible — the new `ContentType` on `Object_GetSignedUrl` is optional.
 
+[1.7.2]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.7.2
 [1.7.1]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.7.1
 [1.7.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.7.0
 [1.6.1]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.6.1

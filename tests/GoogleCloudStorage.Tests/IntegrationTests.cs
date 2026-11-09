@@ -598,7 +598,7 @@ public class IntegrationTests
             {
                 var ex = Assert.ThrowsAny<Exception>(() =>
                     _sut.Object_DeleteByPrefix(TestSupport.Auth(), b, "budget/", out _));
-                Assert.Contains("Deleted 0 of 3", ex.Message);
+                Assert.Contains("Deleted 0 objects", ex.Message);
                 Assert.Contains("call Object_DeleteByPrefix again", ex.Message);
             }
             finally
