@@ -249,7 +249,7 @@ Retrieves an object's full metadata (size, content type, hashes, generation, sto
 | `customMetadata` | `List of MetadataEntry` | The object's custom key-value metadata. Empty when the object has none or does not exist. |
 
 #### `Object_Delete`
-Deletes an object from a bucket. On a bucket with **Object Versioning** or **soft delete** enabled, Google keeps a noncurrent or soft-deleted copy that can be restored (and is billed) until it expires; on other buckets the object is gone. The connector reads the object's generation first and deletes only that generation, so transient errors are retried automatically and an object replaced in the meantime is never deleted (the action then reports it). This needs `storage.objects.get` as well as `storage.objects.delete`; Storage Object Admin has both.
+Deletes an object from a bucket. On a bucket with **Object Versioning** or **soft delete** enabled, Google keeps a noncurrent or soft-deleted copy that can be restored (and is billed) until it expires; on other buckets the object is gone. The connector reads the object's generation first and deletes only that generation, so transient errors are retried automatically and an object replaced in the meantime is never deleted (the action then reports it). With a role that may delete but not read objects, it falls back to an unguarded delete, which is not retried.
 
 **Arguments:**
 | Argument | Type | Description |

@@ -4,6 +4,7 @@ using OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
+using System.Runtime.ExceptionServices;
 using File = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.File;
 using Object = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.Object;
 
@@ -252,6 +253,12 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         try
         {
             generation = storageClient.GetObject(bucketName, objectName).Generation;
+        }
+        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.Forbidden)
+        {
+            // A role that may delete but not read objects: fall back to an unguarded delete (not
+            // retried, as before 1.7.2) rather than refuse an operation the role allows.
+            generation = null;
         }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, objectName); }
 
@@ -625,12 +632,30 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         {
             try
             {
-                return attempt();
+                return UnwrapSingleAggregate(attempt);
             }
             catch (Exception e) when (tried < delays.Length && stopwatch.Elapsed < TransferRetryWindow && IsRetryableTransferFailure(e))
             {
                 Thread.Sleep(delays[tried]);
             }
+        }
+    }
+
+    /// <summary>
+    /// The SDK's synchronous download waits on a task, so a failure (notably the 80-second timeout's
+    /// TaskCanceledException) arrives wrapped in an AggregateException that no handler recognises.
+    /// Rethrows a single inner exception as itself, with its original stack trace.
+    /// </summary>
+    private static T UnwrapSingleAggregate<T>(Func<T> attempt)
+    {
+        try
+        {
+            return attempt();
+        }
+        catch (AggregateException ae) when (ae.InnerExceptions.Count == 1)
+        {
+            ExceptionDispatchInfo.Capture(ae.InnerExceptions[0]).Throw();
+            throw; // unreachable
         }
     }
 
@@ -649,7 +674,9 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     /// Decides whether a 404 from an object GET means the object is missing (true) or the bucket is
     /// (false), without relying on Google's English wording alone: "No such object" is an object, any
     /// other message naming the bucket is a bucket, and an ambiguous one (plain "Not Found") is settled
-    /// by looking the bucket up. If that lookup fails in any other way, the answer is "not the object".
+    /// by looking the bucket up: only a 404 on the bucket means the bucket is missing. If that lookup fails
+    /// in any other way (e.g. 403: Storage Object Admin cannot read buckets), the object is taken as missing,
+    /// as before 1.7.2.
     /// </summary>
     private static bool IsObjectNotFound(StorageClient client, Google.GoogleApiException e, string bucketName)
     {
@@ -661,7 +688,8 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
             client.GetBucket(bucketName);
             return true;
         }
-        catch (Exception) { return false; }
+        catch (Google.GoogleApiException probe) when (probe.HttpStatusCode == HttpStatusCode.NotFound) { return false; }
+        catch (Exception) { return true; }
     }
 
     /// <summary>

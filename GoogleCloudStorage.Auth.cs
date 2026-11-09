@@ -793,7 +793,11 @@ public partial class GoogleCloudStorage
             }
         }
 
-        /// <summary>Reads the body as UTF-8, failing as soon as it exceeds maxBytes (never reads more than maxBytes + 1).</summary>
+        /// <summary>
+        /// Reads the body, failing as soon as it exceeds maxBytes (never reads more than maxBytes + 1).
+        /// Decodes like ReadAsStringAsync: a byte order mark wins, then the Content-Type charset, then UTF-8,
+        /// so a BOM-prefixed token response stays valid JSON.
+        /// </summary>
         private async Task<string> ReadBoundedAsync(HttpContent content, int maxBytes, CancellationToken ct)
         {
             await using var stream = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
@@ -807,7 +811,15 @@ public partial class GoogleCloudStorage
             }
             if (total > maxBytes)
                 throw new IdentityProviderException($"The identity provider token endpoint '{EndpointDisplay}' returned a response larger than 1 MB. Check TokenEndpoint.");
-            return Encoding.UTF8.GetString(buffer, 0, total);
+            Encoding encoding = Encoding.UTF8;
+            string? charset = content.Headers.ContentType?.CharSet?.Trim('"');
+            if (!string.IsNullOrEmpty(charset))
+            {
+                try { encoding = Encoding.GetEncoding(charset); }
+                catch (ArgumentException) { /* unknown charset: keep UTF-8 */ }
+            }
+            using var reader = new StreamReader(new MemoryStream(buffer, 0, total), encoding, detectEncodingFromByteOrderMarks: true);
+            return reader.ReadToEnd();
         }
 
         /// <summary>

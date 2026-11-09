@@ -430,4 +430,46 @@ public sealed class ActionHardeningTests : IDisposable
             _sut.Object_GetSignedUrl(unusable, Bucket, "a.txt", 5, out _, operation: "downloads"));
         Assert.Contains("Invalid Operation", first.Message);
     }
+
+    // ---- Follow-ups from the O11 1.7.3 review --------------------------------------------
+
+    [Fact]
+    public void DL5_Download_timeout_is_translated_not_an_AggregateException_and_not_retried()
+    {
+        SeedContent("big.bin", new byte[10]);
+        _backend.StorageResponseOverride = req => IsMediaGet(req) ? throw new TaskCanceledException("simulated 80-second timeout") : null;
+
+        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Download(ClientCredentials(), Bucket, "big.bin", out _));
+
+        Assert.IsNotType<AggregateException>(ex);
+        Assert.Contains("timed out", ex.Message);
+        Assert.Single(_backend.Requests, IsRecordedMediaGet);
+    }
+
+    [Fact]
+    public void X3_An_ambiguous_404_whose_bucket_probe_is_forbidden_means_the_object_is_missing()
+    {
+        // Storage Object Admin cannot read buckets: the probe's 403 must not turn into "bucket does not exist".
+        _backend.StorageResponseOverride = req =>
+            IsObjectGet(req) ? JsonError(HttpStatusCode.NotFound, "Not Found")
+            : IsBucketGet(req) ? JsonError(HttpStatusCode.Forbidden, "caller does not have storage.buckets.get access")
+            : null;
+
+        _sut.Object_Exists(ClientCredentials(), Bucket, "a.txt", out var exists);
+
+        Assert.False(exists);
+    }
+
+    [Fact]
+    public void D5_Delete_with_a_role_that_cannot_read_falls_back_to_an_unguarded_delete()
+    {
+        Seed("doc.txt", 7);
+        _backend.StorageResponseOverride = req => IsObjectGet(req) ? JsonError(HttpStatusCode.Forbidden, "caller does not have storage.objects.get access") : null;
+
+        _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt");
+
+        var delete = Assert.Single(_backend.Requests, IsRecordedDelete);
+        Assert.Null(HttpUtility.ParseQueryString(delete.Uri.Query)["ifGenerationMatch"]);
+        Assert.Empty(_backend.Objects);
+    }
 }

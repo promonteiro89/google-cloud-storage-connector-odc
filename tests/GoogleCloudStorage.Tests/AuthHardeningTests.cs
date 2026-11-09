@@ -173,6 +173,23 @@ public sealed class AuthHardeningTests : IDisposable
         Assert.False(exists); // the object is absent in the fake; what matters is that the token call succeeded
     }
 
+    [Fact]
+    public void R3_TokenResponseWithUtf8ByteOrderMarkIsStillValidJson()
+    {
+        // Reading the body ourselves (for the 1 MB cap) must decode like ReadAsStringAsync: a BOM is not JSON.
+        byte[] json = Encoding.UTF8.GetBytes($"{{\"access_token\":\"{_backend.IdpToken}\",\"expires_in\":3600}}");
+        byte[] body = new byte[] { 0xEF, 0xBB, 0xBF }.Concat(json).ToArray();
+        _backend.IdpResponseOverride = _ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) };
+            response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+            return response;
+        };
+
+        _sut.Object_Exists(ClientCredentials(), "test-bucket-alpha", "a.txt", out bool exists);
+        Assert.False(exists); // the object is absent in the fake; what matters is that the token response parsed
+    }
+
     // ---- A5: the cache cap holds on insert --------------------------------------------------
 
     [Fact]
