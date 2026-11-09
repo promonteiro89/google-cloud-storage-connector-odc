@@ -207,17 +207,27 @@ public partial class GoogleCloudStorage
     /// <summary>
     /// Production identity-provider client: never follows redirects (a 307/308 would re-send the
     /// client secret to the redirect target and silently swap the token endpoint), renews its
-    /// connections every 5 minutes so DNS changes are picked up, and gives up after 30 seconds.
+    /// connections every 5 minutes so DNS changes are picked up, keeps no cookies (the client is shared
+    /// by every app that uses the library, so a cookie set for one app's request must not reach another's),
+    /// and leaves timing to <see cref="IdentityProviderDeadline"/>.
     /// </summary>
     private static readonly Lazy<HttpClient> IdentityProviderHttp = new(() =>
         new HttpClient(new SocketsHttpHandler
         {
             AllowAutoRedirect = false,
+            UseCookies = false,
             PooledConnectionLifetime = TimeSpan.FromMinutes(5)
         })
         {
-            Timeout = TimeSpan.FromSeconds(30)
+            Timeout = Timeout.InfiniteTimeSpan
         });
+
+    /// <summary>
+    /// One deadline for the whole client-credentials exchange: both client-authentication attempts,
+    /// response headers and body. Separate limits let one token request take about 120 seconds, past
+    /// ODC's 95-second action limit. Test seam.
+    /// </summary>
+    internal static TimeSpan IdentityProviderDeadline { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// Test seam: when set, all Google auth/Storage HTTP traffic and identity provider token requests
@@ -246,7 +256,7 @@ public partial class GoogleCloudStorage
         else if (method.Equals(MethodWorkloadIdentityFederation, StringComparison.OrdinalIgnoreCase))
             resolved = AuthMethod.WorkloadIdentityFederation;
         else
-            throw new ArgumentException($"Invalid AuthenticationMethod '{a.AuthenticationMethod}'. Use '{MethodWorkloadIdentityFederation}' or '{MethodServiceAccountKey}' (or leave it empty for {MethodServiceAccountKey}).");
+            throw new ArgumentException($"Invalid AuthenticationMethod '{Clean(a.AuthenticationMethod)}'. Use '{MethodWorkloadIdentityFederation}' or '{MethodServiceAccountKey}' (or leave it empty for {MethodServiceAccountKey}).");
 
         var missing = new List<string>();
         if (resolved == AuthMethod.ServiceAccountKey)
@@ -299,7 +309,7 @@ public partial class GoogleCloudStorage
             && p.Contains("/workloadIdentityPools/", StringComparison.Ordinal)
             && p.Contains("/providers/", StringComparison.Ordinal);
         if (!valid)
-            throw new ArgumentException($"WorkloadIdentityProvider '{provider}' is not a workload identity provider resource name. Expected '//iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID'.");
+            throw new ArgumentException($"WorkloadIdentityProvider '{Clean(provider)}' is not a workload identity provider resource name. Expected '//iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID'.");
         return p;
     }
 
@@ -679,6 +689,10 @@ public partial class GoogleCloudStorage
                 http = IdentityProviderHttp.Value;
             }
 
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deadline.CancelAfter(IdentityProviderDeadline);
+            string timedOut = $"The identity provider token endpoint '{EndpointDisplay}' did not respond within {IdentityProviderDeadline.TotalSeconds:0} seconds.";
+
             // client_secret_post first (Entra ID, Auth0, Keycloak); if the provider rejects the client,
             // retry once with HTTP Basic client authentication (Okta's default).
             for (int attempt = 0; ; attempt++)
@@ -703,7 +717,7 @@ public partial class GoogleCloudStorage
                 HttpResponseMessage response;
                 try
                 {
-                    response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+                    response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
                 }
                 catch (Exception e) when (e is HttpRequestException || e is TaskCanceledException)
                 {
@@ -711,31 +725,27 @@ public partial class GoogleCloudStorage
                     if (ct.IsCancellationRequested)
                         throw;
                     if (e is TaskCanceledException)
-                        throw new IdentityProviderException($"The identity provider token endpoint '{EndpointDisplay}' did not respond within 30 seconds.", e);
-                    throw new IdentityProviderException($"Could not reach the identity provider token endpoint '{EndpointDisplay}': {e.Message}", e);
+                        throw new IdentityProviderException(timedOut, e);
+                    throw new IdentityProviderException($"Could not reach the identity provider token endpoint '{EndpointDisplay}': {Clean(e.Message)}", e);
                 }
 
                 using (response)
                 {
                     string body;
-                    // HttpClient.Timeout does not cover the body with ResponseHeadersRead: bound it here.
-                    using (var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                    // The same deadline bounds the body, which ResponseHeadersRead leaves outside SendAsync.
+                    try
                     {
-                        readCts.CancelAfter(TimeSpan.FromSeconds(30));
-                        try
-                        {
-                            body = await ReadBoundedAsync(response.Content, MaxIdentityProviderResponseBytes, readCts.Token).ConfigureAwait(false);
-                        }
-                        catch (OperationCanceledException e)
-                        {
-                            if (ct.IsCancellationRequested)
-                                throw;
-                            throw new IdentityProviderException($"The identity provider token endpoint '{EndpointDisplay}' did not respond within 30 seconds.", e);
-                        }
-                        catch (Exception e) when (e is HttpRequestException || e is IOException)
-                        {
-                            throw new IdentityProviderException($"Could not reach the identity provider token endpoint '{EndpointDisplay}': {e.Message}", e);
-                        }
+                        body = await ReadBoundedAsync(response.Content, MaxIdentityProviderResponseBytes, deadline.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException e)
+                    {
+                        if (ct.IsCancellationRequested)
+                            throw;
+                        throw new IdentityProviderException(timedOut, e);
+                    }
+                    catch (Exception e) when (e is HttpRequestException || e is IOException)
+                    {
+                        throw new IdentityProviderException($"Could not reach the identity provider token endpoint '{EndpointDisplay}': {Clean(e.Message)}", e);
                     }
 
                     int statusCode = (int)response.StatusCode;
@@ -779,7 +789,7 @@ public partial class GoogleCloudStorage
                         string contentType = response.Content.Headers.ContentType != null
                             ? response.Content.Headers.ContentType.ToString()
                             : "none";
-                        detail = $"(non-JSON response, {Encoding.UTF8.GetByteCount(body)} bytes, Content-Type {contentType})";
+                        detail = $"(non-JSON response, {Encoding.UTF8.GetByteCount(body)} bytes, Content-Type {Clean(contentType)})";
                     }
 
                     bool invalidClient = response.StatusCode == HttpStatusCode.Unauthorized || rawError == "invalid_client";
@@ -824,15 +834,21 @@ public partial class GoogleCloudStorage
 
         /// <summary>
         /// Makes text from the identity provider safe to put in a message: the client secret (some
-        /// providers echo the request) is masked, control characters become spaces, and it is cut at 300 characters.
+        /// providers echo the request, plain or URL-encoded as it was sent) is masked, control and invisible
+        /// formatting characters become spaces, and it is cut at 300 characters.
         /// </summary>
         private static string SanitizeProviderText(string text, string? secret)
         {
             if (!string.IsNullOrEmpty(secret))
+            {
                 text = text.Replace(secret, "***", StringComparison.Ordinal);
+                foreach (var encoded in new[] { Uri.EscapeDataString(secret), WebUtility.UrlEncode(secret) })
+                    if (encoded != secret)
+                        text = text.Replace(encoded, "***", StringComparison.OrdinalIgnoreCase);
+            }
             var chars = text.ToCharArray();
             for (int i = 0; i < chars.Length; i++)
-                if (char.IsControl(chars[i])) chars[i] = ' ';
+                if (char.IsControl(chars[i]) || char.GetUnicodeCategory(chars[i]) == System.Globalization.UnicodeCategory.Format) chars[i] = ' ';
             text = new string(chars);
             return text.Length > 300 ? text[..300] + "..." : text;
         }
@@ -916,7 +932,7 @@ public partial class GoogleCloudStorage
 
     private static string UnauthenticatedHint(Authentication a) =>
         ResolveAuthMethodSafe(a) == AuthMethod.WorkloadIdentityFederation
-            ? $"Check the Workload Identity Federation setup (provider, attribute condition) and that the federated identity has 'Workload Identity User' on '{a.ServiceAccountEmail}'."
+            ? $"Check the Workload Identity Federation setup (provider, attribute condition) and that the federated identity has 'Workload Identity User' on '{Clean(a.ServiceAccountEmail)}'."
             : "Check that ClientEmail and PrivateKey belong to the same service account and that the key has not been revoked.";
 
     /// <summary>
@@ -926,9 +942,9 @@ public partial class GoogleCloudStorage
     private static Exception FriendlyAuthException(TokenResponseException e, Authentication a)
     {
         if (ResolveAuthMethodSafe(a) == AuthMethod.WorkloadIdentityFederation)
-            return new Exception($"Workload Identity Federation failed for service account '{a.ServiceAccountEmail}': Google rejected the token exchange or impersonation. Common causes: a wrong WorkloadIdentityProvider value, a token whose issuer or audience does not match the provider, a token rejected by the attribute condition, or a federated identity without 'Workload Identity User' on the service account. Details: {e.Message}", e);
+            return new Exception($"Workload Identity Federation failed for service account '{Clean(a.ServiceAccountEmail)}': Google rejected the token exchange or impersonation. Common causes: a wrong WorkloadIdentityProvider value, a token whose issuer or audience does not match the provider, a token rejected by the attribute condition, or a federated identity without 'Workload Identity User' on the service account. Details: {Clean(e.Message)}", e);
 
-        return new Exception($"Google rejected the service account credentials for '{a.ClientEmail}' (ClientEmail/PrivateKey mismatch, deleted service account, revoked key, or server clock skew). Details: {e.Message}", e);
+        return new Exception($"Google rejected the service account credentials for '{Clean(a.ClientEmail)}' (ClientEmail/PrivateKey mismatch, deleted service account, revoked key, or server clock skew). Details: {Clean(e.Message)}", e);
     }
 
     /// <summary>
@@ -942,9 +958,9 @@ public partial class GoogleCloudStorage
         if (ResolveAuthMethodSafe(a) == AuthMethod.WorkloadIdentityFederation)
         {
             if (e.HttpStatusCode == HttpStatusCode.Forbidden)
-                return new Exception($"Signing the URL failed: service account '{a.ServiceAccountEmail}' could not sign through the IAM Credentials API. Grant the federated identity 'Service Account Token Creator' on the service account. Details: {details}", e);
-            return new Exception($"Signing the URL failed for service account '{a.ServiceAccountEmail}' ({(int)e.HttpStatusCode}): {details}", e);
+                return new Exception($"Signing the URL failed: service account '{Clean(a.ServiceAccountEmail)}' could not sign through the IAM Credentials API. Grant the federated identity 'Service Account Token Creator' on the service account. Details: {Clean(details)}", e);
+            return new Exception($"Signing the URL failed for service account '{Clean(a.ServiceAccountEmail)}' ({(int)e.HttpStatusCode}): {Clean(details)}", e);
         }
-        return new Exception($"Signing the URL failed for service account '{a.ClientEmail}'. Details: {details}", e);
+        return new Exception($"Signing the URL failed for service account '{Clean(a.ClientEmail)}'. Details: {Clean(details)}", e);
     }
 }

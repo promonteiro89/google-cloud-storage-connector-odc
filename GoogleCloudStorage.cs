@@ -98,7 +98,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         }
         catch (OperationCanceledException e) when (deadline.IsCancellationRequested)
         {
-            throw new Exception($"Uploading '{objectName}' ({FormatBytes(file.Size)}) did not finish within {FileTransferDeadline.TotalSeconds:0} seconds, the most an ODC action can spend on it; nothing was stored. A bucket in or near your ODC region is several times faster; for files this large, upload with Object_GetSignedUrl (Operation 'Upload') instead.", e);
+            throw new Exception($"Uploading '{Clean(objectName)}' ({FormatBytes(file.Size)}) did not finish within {FileTransferDeadline.TotalSeconds:0} seconds, the most an ODC action can spend on it; nothing was stored. A bucket in or near your ODC region is several times faster; for files this large, upload with Object_GetSignedUrl (Operation 'Upload') instead.", e);
         }
         catch (FileStorageException e) { throw FileStorageFailure(e); }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, null); }
@@ -117,7 +117,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
             // Read the size and type first: refuse what ODC cannot store before transferring anything.
             var obj = storageClient.GetObjectAsync(bucketName, objectName, null, deadline.Token).GetAwaiter().GetResult();
             if (obj.Size > (ulong)MaxFileBytes)
-                throw new Exception($"Object '{objectName}' is {FormatBytes((long)obj.Size!.Value)}, larger than the 2 GB an ODC File can hold. Use Object_GetSignedUrl with Operation 'Download' and let the client download it directly from Google.");
+                throw new Exception($"Object '{Clean(objectName)}' is {FormatBytes((long)obj.Size!.Value)}, larger than the 2 GB an ODC File can hold. Use Object_GetSignedUrl with Operation 'Download' and let the client download it directly from Google.");
 
             var name = FileNameFor(objectName);
             var type = string.IsNullOrEmpty(obj.ContentType) ? "application/octet-stream" : obj.ContentType;
@@ -133,9 +133,13 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         }
         catch (OperationCanceledException e) when (deadline.IsCancellationRequested)
         {
-            throw new Exception($"Downloading '{objectName}' did not finish within {FileTransferDeadline.TotalSeconds:0} seconds, the most an ODC action can spend on it. A bucket in or near your ODC region is several times faster; for objects this large, use Object_GetSignedUrl (Operation 'Download') and let the client download it directly from Google.", e);
+            throw new Exception($"Downloading '{Clean(objectName)}' did not finish within {FileTransferDeadline.TotalSeconds:0} seconds, the most an ODC action can spend on it. A bucket in or near your ODC region is several times faster; for objects this large, use Object_GetSignedUrl (Operation 'Download') and let the client download it directly from Google.", e);
         }
         catch (FileStorageException e) { throw FileStorageFailure(e); }
+        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
+        {
+            throw NotFoundException(storageClient, e, authentication, bucketName, objectName);
+        }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, objectName); }
     }
 
@@ -192,7 +196,11 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         catch (Exception e) when (FindInChain<DownloadTooLargeException>(e) != null)
         {
             // The SDK may wrap whatever the target stream throws, so look through the chain.
-            throw new Exception($"Object '{objectName}' is larger than {MaxDownloadBytes} bytes (5.5 MB), the most an ODC action can return as Binary Data. Use Object_Download to get it as a File, or Object_GetSignedUrl with Operation 'Download' to let the client download it directly from Google.");
+            throw new Exception($"Object '{Clean(objectName)}' is larger than {MaxDownloadBytes} bytes (5.5 MB), the most an ODC action can return as Binary Data. Use Object_Download to get it as a File, or Object_GetSignedUrl with Operation 'Download' to let the client download it directly from Google.");
+        }
+        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
+        {
+            throw NotFoundException(storageClient, e, authentication, bucketName, objectName);
         }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, objectName); }
     }
@@ -350,15 +358,32 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
             // retried, as before 1.7.2) rather than refuse an operation the role allows.
             generation = null;
         }
+        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
+        {
+            throw NotFoundException(storageClient, e, authentication, bucketName, objectName);
+        }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, objectName); }
 
+        // The connector repeats the guarded delete itself (the SDK's retry is off), so it knows when a
+        // request was sent again: if Google applied the first one but its answer was lost, the repeat
+        // answers 412 (or 404), and the object is in fact deleted.
+        var send = new SendState();
         try
         {
-            storageClient.DeleteObject(bucketName, objectName, new DeleteObjectOptions { IfGenerationMatch = generation });
+            SendWithRetry(send, retry: generation != null, () =>
+                storageClient.DeleteObject(bucketName, objectName, new DeleteObjectOptions { IfGenerationMatch = generation, RetryOptions = RetryOptions.Never }));
+        }
+        catch (Google.GoogleApiException e) when (send.Resent && e.HttpStatusCode is HttpStatusCode.PreconditionFailed or HttpStatusCode.NotFound)
+        {
+            // Deleted by the request whose answer was lost.
         }
         catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.PreconditionFailed)
         {
-            throw new Exception($"Object '{objectName}' in bucket '{bucketName}' was replaced while it was being deleted; nothing was deleted. Retry the delete if the new version should be removed too.", e);
+            throw new Exception($"Object '{Clean(objectName)}' in bucket '{Clean(bucketName)}' was replaced while it was being deleted; nothing was deleted. Retry the delete if the new version should be removed too.", e);
+        }
+        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
+        {
+            throw NotFoundException(storageClient, e, authentication, bucketName, objectName);
         }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, objectName); }
     }
@@ -393,7 +418,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         // Copying an object onto itself and then deleting the source would destroy the only copy.
         if (string.Equals(sourceBucketName, destinationBucketName, StringComparison.Ordinal)
             && string.Equals(sourceObjectName, destinationObjectName, StringComparison.Ordinal))
-            throw new ArgumentException($"Source and destination are the same object ('{sourceBucketName}/{sourceObjectName}'); Object_Move would delete it. Use a different destination name.");
+            throw new ArgumentException($"Source and destination are the same object ('{Clean(sourceBucketName)}/{Clean(sourceObjectName)}'); Object_Move would delete it. Use a different destination name.");
 
         var storageClient = GetStorageClient(authentication);
 
@@ -405,6 +430,10 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         {
             generation = storageClient.GetObject(sourceBucketName, sourceObjectName).Generation;
         }
+        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
+        {
+            throw NotFoundException(storageClient, e, authentication, sourceBucketName, sourceObjectName);
+        }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, sourceBucketName, sourceObjectName); }
 
         try
@@ -414,7 +443,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         }
         catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.PreconditionFailed)
         {
-            throw new Exception($"The source object '{sourceBucketName}/{sourceObjectName}' changed while it was being moved; nothing was moved. Retry the move.", e);
+            throw new Exception($"The source object '{Clean(sourceBucketName)}/{Clean(sourceObjectName)}' changed while it was being moved; nothing was moved. Retry the move.", e);
         }
         catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
         {
@@ -425,10 +454,15 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         // Move is copy-then-delete and is not atomic: if the delete fails, both objects exist.
         // Surface that state explicitly instead of a generic error. The delete is guarded by the
         // generation read before the copy, so an overwritten source (newer data) is left alone.
+        var send = new SendState();
         try
         {
-            storageClient.DeleteObject(sourceBucketName, sourceObjectName,
-                new DeleteObjectOptions { IfGenerationMatch = generation });
+            SendWithRetry(send, retry: true, () => storageClient.DeleteObject(sourceBucketName, sourceObjectName,
+                new DeleteObjectOptions { IfGenerationMatch = generation, RetryOptions = RetryOptions.Never }));
+        }
+        catch (Google.GoogleApiException e) when (send.Resent && e.HttpStatusCode == HttpStatusCode.PreconditionFailed)
+        {
+            // A repeated delete answered 412: the first request deleted the source and its answer was lost.
         }
         catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
         {
@@ -436,11 +470,11 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         }
         catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.PreconditionFailed)
         {
-            throw new Exception($"The object was copied to '{destinationBucketName}/{destinationObjectName}' (generation {generation}), but the source '{sourceBucketName}/{sourceObjectName}' was modified during the move and was not deleted - both objects exist and the source holds newer data.", e);
+            throw new Exception($"The object was copied to '{Clean(destinationBucketName)}/{Clean(destinationObjectName)}' (generation {generation}), but the source '{Clean(sourceBucketName)}/{Clean(sourceObjectName)}' was modified during the move and was not deleted - both objects exist and the source holds newer data.", e);
         }
         catch (Exception e) when (IsTranslatable(e))
         {
-            throw new Exception($"The object was copied to '{destinationBucketName}/{destinationObjectName}' but the source '{sourceBucketName}/{sourceObjectName}' could not be deleted - both objects currently exist. Cause: {TranslateException(e, authentication, sourceBucketName, sourceObjectName).Message}", e);
+            throw new Exception($"The object was copied to '{Clean(destinationBucketName)}/{Clean(destinationObjectName)}' but the source '{Clean(sourceBucketName)}/{Clean(sourceObjectName)}' could not be deleted - both objects currently exist. Cause: {TranslateException(e, authentication, sourceBucketName, sourceObjectName).Message}", e);
         }
     }
 
@@ -485,16 +519,28 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
                 patch.Metadata = patchMetadata;
             }
 
+            var send = new SendState();
             try
             {
                 // Setting any precondition turns off the SDK's automatic ones, so both are explicit: the
                 // generation guards against a content replacement (which resets metageneration to 1).
-                storageClient.PatchObject(patch, new PatchObjectOptions { IfGenerationMatch = obj.Generation, IfMetagenerationMatch = obj.Metageneration });
+                // The connector repeats the request itself (the SDK's retry is off), so it knows when a 412
+                // answers a repeat, which the first request's own change may have caused.
+                SendWithRetry(send, retry: true, () => storageClient.PatchObject(patch,
+                    new PatchObjectOptions { IfGenerationMatch = obj.Generation, IfMetagenerationMatch = obj.Metageneration, RetryOptions = RetryOptions.Never }));
+            }
+            catch (Google.GoogleApiException e) when (send.Resent && e.HttpStatusCode == HttpStatusCode.PreconditionFailed)
+            {
+                throw new Exception($"The metadata update of object '{Clean(objectName)}' in bucket '{Clean(bucketName)}' may already have been applied: the request was sent again after a network error, and the repeat found the object changed. Read its metadata with Object_GetMetadata before retrying.", e);
             }
             catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.PreconditionFailed)
             {
-                throw new Exception($"Object '{objectName}' in bucket '{bucketName}' was changed by another request while its metadata was being updated, so nothing was changed. Read it again and retry.", e);
+                throw new Exception($"Object '{Clean(objectName)}' in bucket '{Clean(bucketName)}' was changed by another request while its metadata was being updated, so nothing was changed. Read it again and retry.", e);
             }
+        }
+        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
+        {
+            throw NotFoundException(storageClient, e, authentication, bucketName, objectName);
         }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, objectName); }
     }
@@ -514,7 +560,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         using var deadline = new CancellationTokenSource(DeleteByPrefixDeadline);
         long deleted = 0;
 
-        Exception BudgetExceeded() => new Exception($"Deleted {deleted} objects under prefix '{prefix}' before the {DeleteByPrefixBudget.TotalSeconds:0}-second time budget of one call ran out (ODC limits an action to 95 seconds). Nothing was rolled back; call Object_DeleteByPrefix again with the same prefix to delete the rest.");
+        Exception BudgetExceeded() => new Exception($"Deleted {deleted} objects under prefix '{Clean(prefix)}' before the {DeleteByPrefixBudget.TotalSeconds:0}-second time budget of one call ran out (ODC limits an action to 95 seconds). Nothing was rolled back; call Object_DeleteByPrefix again with the same prefix to delete the rest.");
 
         // Delete page by page: each delete carries the generation it was listed with (which makes the SDK
         // retry transient failures), and GCS page tokens are positional, so deleting listed objects does
@@ -535,7 +581,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
                 catch (Exception e) when (IsTranslatable(e))
                 {
                     if (deleted == 0) throw TranslateException(e, authentication, bucketName, null);
-                    throw new Exception($"Deleted {deleted} objects under prefix '{prefix}', then listing the remaining objects failed: {TranslateException(e, authentication, bucketName, null).Message}", e);
+                    throw new Exception($"Deleted {deleted} objects under prefix '{Clean(prefix)}', then listing the remaining objects failed: {TranslateException(e, authentication, bucketName, null).Message}", e);
                 }
 
                 foreach (var obj in pages.Current.Items ?? new List<Google.Apis.Storage.v1.Data.Object>())
@@ -559,7 +605,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
                     {
                         // TranslateException gives the same message a whole-object call would give, so the
                         // partial-progress error carries an actionable cause instead of Google's raw text.
-                        throw new Exception($"Deleted {deleted} objects under prefix '{prefix}', then failed on '{obj.Name}': {TranslateException(e, authentication, bucketName, obj.Name).Message}", e);
+                        throw new Exception($"Deleted {deleted} objects under prefix '{Clean(prefix)}', then failed on '{Clean(obj.Name)}': {TranslateException(e, authentication, bucketName, obj.Name).Message}", e);
                     }
                 }
             }
@@ -592,7 +638,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
             "DOWNLOAD" => HttpMethod.Get,
             "UPLOAD" => HttpMethod.Put,
             "DELETE" => HttpMethod.Delete,
-            _ => throw new ArgumentException($"Invalid Operation '{operation}'. Use 'Download', 'Upload', or 'Delete'.")
+            _ => throw new ArgumentException($"Invalid Operation '{Clean(operation)}'. Use 'Download', 'Upload', or 'Delete'.")
         };
 
         var urlSigner = GetUrlSigner(authentication);
@@ -662,7 +708,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         {
             // Creating a bucket never 404s on the bucket itself: the project is what was not found.
             string details = e.Error != null && !string.IsNullOrEmpty(e.Error.Message) ? e.Error.Message : e.Message;
-            throw new Exception($"Bucket '{bucketName}' was not created: project '{authentication.ProjectId.Trim()}' was not found, or the service account cannot access it. Check ProjectId. Details: {details}", e);
+            throw new Exception($"Bucket '{Clean(bucketName)}' was not created: project '{Clean(authentication.ProjectId.Trim())}' was not found, or the service account cannot access it. Check ProjectId. Details: {Clean(details)}", e);
         }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, null); }
     }
@@ -705,7 +751,24 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     private static void Require(string? value, string name)
     {
         if (string.IsNullOrWhiteSpace(value))
-            throw new ArgumentException($"{name} cannot be empty.");
+            throw new ArgumentException($"{Clean(name)} cannot be empty.");
+    }
+
+    /// <summary>
+    /// Makes caller input and Google's error text safe to put in an error message: control characters
+    /// (line breaks, tabs) and invisible formatting characters (such as the bidirectional overrides
+    /// U+202E and U+2066-2069) become spaces, so a crafted object name cannot forge or reorder lines in
+    /// the ODC error log, and the text is cut at 500 characters.
+    /// </summary>
+    internal static string Clean(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return text ?? "";
+        var chars = text.ToCharArray();
+        for (int i = 0; i < chars.Length; i++)
+            if (char.IsControl(chars[i]) || char.GetUnicodeCategory(chars[i]) == System.Globalization.UnicodeCategory.Format)
+                chars[i] = ' ';
+        var cleaned = new string(chars);
+        return cleaned.Length > 500 ? cleaned[..500] + "..." : cleaned;
     }
 
     /// <summary>
@@ -741,7 +804,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     /// <summary>ODC storage refused to read or create a File (for example a temporary File that expired).</summary>
     private static Exception FileStorageFailure(FileStorageException e) =>
-        new Exception($"ODC file storage failed: {e.Message}", e);
+        new Exception($"ODC file storage failed: {Clean(e.Message)}", e);
 
     /// <summary>
     /// Runs one upload or download attempt, retrying transient failures (408, 429, 500, 502, 503, 504,
@@ -796,6 +859,43 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     }
 
     /// <summary>
+    /// Translates a 404 from an object request, settling an unclear one (an emulator's or proxy's plain
+    /// "Not Found") with <see cref="IsObjectNotFound"/>, so a missing bucket is not reported as a missing object.
+    /// </summary>
+    private static Exception NotFoundException(StorageClient client, Google.GoogleApiException e, Authentication authentication, string bucketName, string objectName) =>
+        TranslateException(e, authentication, bucketName, IsObjectNotFound(client, e, bucketName) ? objectName : null);
+
+    /// <summary>Whether the request in <see cref="SendWithRetry"/> was sent more than once.</summary>
+    private sealed class SendState
+    {
+        public bool Resent { get; set; }
+    }
+
+    /// <summary>
+    /// Sends a request whose SDK retry is off, repeating it on the same transient failures and with the
+    /// same delays as transfers when <paramref name="retry"/> is true. <see cref="SendState.Resent"/> is set
+    /// before a repeat, so the caller's exception filters can tell that a 412 or 404 answered a repeat.
+    /// </summary>
+    private static void SendWithRetry(SendState state, bool retry, Action send)
+    {
+        var delays = TransferRetryDelays;
+        var stopwatch = Stopwatch.StartNew();
+        for (int tried = 0; ; tried++)
+        {
+            try
+            {
+                UnwrapSingleAggregate(() => { send(); return 0; });
+                return;
+            }
+            catch (Exception e) when (retry && tried < delays.Length && stopwatch.Elapsed < TransferRetryWindow && IsRetryableTransferFailure(e))
+            {
+                Thread.Sleep(delays[tried]);
+                state.Resent = true;
+            }
+        }
+    }
+
+    /// <summary>
     /// Decides whether a 404 from an object GET means the object is missing (true) or the bucket is
     /// (false), without relying on Google's English wording alone: "No such object" is an object, any
     /// other message naming the bucket is a bucket, and an ambiguous one (plain "Not Found") is settled
@@ -830,16 +930,16 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
             var probed = storageClient.GetObject(sourceBucketName, sourceObjectName);
             // A source that was replaced meanwhile is a change, not a missing bucket (Move only).
             if (expectedSourceGeneration.HasValue && probed.Generation != expectedSourceGeneration)
-                return new Exception($"The source object '{sourceBucketName}/{sourceObjectName}' changed while it was being moved; nothing was moved. Retry the move.", e);
+                return new Exception($"The source object '{Clean(sourceBucketName)}/{Clean(sourceObjectName)}' changed while it was being moved; nothing was moved. Retry the move.", e);
             return FriendlyException(e, authentication, destinationBucketName, null);
         }
         catch (Google.GoogleApiException probe) when (probe.HttpStatusCode == HttpStatusCode.NotFound)
         {
-            return FriendlyException(probe, authentication, sourceBucketName, sourceObjectName);
+            return NotFoundException(storageClient, probe, authentication, sourceBucketName, sourceObjectName);
         }
         catch (Exception probe) when (IsTranslatable(probe))
         {
-            return new Exception($"The copy from '{sourceBucketName}/{sourceObjectName}' failed with 404: either that source object or the destination bucket '{destinationBucketName}' does not exist, and checking the source failed: {TranslateException(probe, authentication, sourceBucketName, sourceObjectName).Message}", e);
+            return new Exception($"The copy from '{Clean(sourceBucketName)}/{Clean(sourceObjectName)}' failed with 404: either that source object or the destination bucket '{Clean(destinationBucketName)}' does not exist, and checking the source failed: {TranslateException(probe, authentication, sourceBucketName, sourceObjectName).Message}", e);
         }
     }
 
@@ -974,16 +1074,16 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
                 var identityProvider = FindInChain<IdentityProviderException>(e);
                 if (identityProvider != null)
                     return new Exception(identityProvider.Message, e);
-                return new Exception($"Workload Identity Federation could not obtain the identity provider token: {InnermostMessage(e)}", e);
+                return new Exception($"Workload Identity Federation could not obtain the identity provider token: {Clean(InnermostMessage(e))}", e);
             case IdentityProviderException:
                 return new Exception(e.Message, e);
             case IOException io when io.Message != null && io.Message.StartsWith("Incorrect hash", StringComparison.Ordinal):
                 // In Google.Cloud.Storage.V1 5.0, a download CRC32C mismatch throws an IOException starting with "Incorrect hash:".
-                return new Exception($"The downloaded data did not match the object's checksum, so no content was returned. This is usually a transient network error - retry the download. Details: {e.Message}", e);
+                return new Exception($"The downloaded data did not match the object's checksum, so no content was returned. This is usually a transient network error - retry the download. Details: {Clean(e.Message)}", e);
             case IOException:
-                return new Exception($"The connection to Google Cloud was interrupted: {InnermostMessage(e).TrimEnd('.')}. Retry the request.", e);
+                return new Exception($"The connection to Google Cloud was interrupted: {Clean(InnermostMessage(e).TrimEnd('.'))}. Retry the request.", e);
             case HttpRequestException:
-                return new Exception($"Could not reach Google Cloud: {InnermostMessage(e).TrimEnd('.')}. Check the outbound HTTPS access to *.googleapis.com.", e);
+                return new Exception($"Could not reach Google Cloud: {Clean(InnermostMessage(e).TrimEnd('.'))}. Check the outbound HTTPS access to *.googleapis.com.", e);
             default:
                 // Actions take no CancellationToken, so a TaskCanceledException is a request timeout.
                 return new Exception($"The request to Google Cloud timed out (no response within {StorageRequestTimeout.TotalSeconds:0} seconds). Retry the action; for large files use Object_GetSignedUrl and let the client transfer the file directly.", e);
@@ -1024,25 +1124,25 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         string details = e.Error != null && !string.IsNullOrEmpty(e.Error.Message) ? e.Error.Message : e.Message;
 
         if ((int)e.HttpStatusCode == 0)
-            return new Exception($"The request was rejected before it was sent to Google Cloud Storage because an input is invalid: {details}", e);
+            return new Exception($"The request was rejected before it was sent to Google Cloud Storage because an input is invalid: {Clean(details)}", e);
         if (e.HttpStatusCode == HttpStatusCode.NotFound && bucketName != null)
         {
             if (objectName != null && !IsBucketNotFound(e))
-                return new Exception($"Object '{objectName}' was not found in bucket '{bucketName}'. Details: {details}", e);
-            return new Exception($"Bucket '{bucketName}' does not exist (names are case-sensitive and must match exactly). Details: {details}", e);
+                return new Exception($"Object '{Clean(objectName)}' was not found in bucket '{Clean(bucketName)}'. Details: {Clean(details)}", e);
+            return new Exception($"Bucket '{Clean(bucketName)}' does not exist (names are case-sensitive and must match exactly). Details: {Clean(details)}", e);
         }
         if (e.HttpStatusCode == HttpStatusCode.Forbidden)
-            return new Exception($"Access denied for service account '{IdentityOf(authentication)}'. Grant it the required IAM role in Google Cloud (Storage Object Admin for object operations, Storage Admin for bucket operations). Details: {details}", e);
+            return new Exception($"Access denied for service account '{Clean(IdentityOf(authentication))}'. Grant it the required IAM role in Google Cloud (Storage Object Admin for object operations, Storage Admin for bucket operations). Details: {Clean(details)}", e);
         if (e.HttpStatusCode == HttpStatusCode.Unauthorized)
-            return new Exception($"Google rejected the request as unauthenticated. {UnauthenticatedHint(authentication)} Details: {details}", e);
+            return new Exception($"Google rejected the request as unauthenticated. {UnauthenticatedHint(authentication)} Details: {Clean(details)}", e);
         if (e.HttpStatusCode == HttpStatusCode.BadRequest && IsChecksumMismatch(details))
-            return new Exception($"Upload rejected by Google Cloud Storage: the data it received did not match the CRC32C checksum computed by the connector, so nothing was stored and any existing object was left unchanged. This is usually a transient network error - retry the upload. Details: {details}", e);
+            return new Exception($"Upload rejected by Google Cloud Storage: the data it received did not match the CRC32C checksum computed by the connector, so nothing was stored and any existing object was left unchanged. This is usually a transient network error - retry the upload. Details: {Clean(details)}", e);
         if (e.HttpStatusCode == HttpStatusCode.Conflict)
         {
             if (details.IndexOf("not empty", StringComparison.OrdinalIgnoreCase) >= 0)
-                return new Exception($"Bucket '{bucketName}' is not empty. Delete all objects in it before deleting the bucket. Details: {details}", e);
-            return new Exception($"Conflict: {details} (for Bucket_Create this usually means the name is already taken - bucket names are global across all of Google Cloud Storage).", e);
+                return new Exception($"Bucket '{Clean(bucketName)}' is not empty. Delete all objects in it before deleting the bucket. Details: {Clean(details)}", e);
+            return new Exception($"Conflict: {Clean(details)} (for Bucket_Create this usually means the name is already taken - bucket names are global across all of Google Cloud Storage).", e);
         }
-        return new Exception($"Google Cloud Storage error ({(int)e.HttpStatusCode} {e.HttpStatusCode}): {details}", e);
+        return new Exception($"Google Cloud Storage error ({(int)e.HttpStatusCode} {e.HttpStatusCode}): {Clean(details)}", e);
     }
 }

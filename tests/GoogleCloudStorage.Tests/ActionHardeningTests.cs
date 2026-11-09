@@ -472,4 +472,166 @@ public sealed class ActionHardeningTests : IDisposable
         Assert.Null(HttpUtility.ParseQueryString(delete.Uri.Query)["ifGenerationMatch"]);
         Assert.Empty(_backend.Objects);
     }
+
+    // ---- 2.0.0: findings from the O11 connector's 1.7.4 reviews ---------------------------
+
+    [Fact]
+    public void R4_A_repeated_delete_answered_412_counts_as_deleted_and_leaves_the_new_object()
+    {
+        Seed("doc.txt", 7);
+        int deletes = 0;
+        _backend.StorageResponseOverride = req =>
+        {
+            if (!IsDelete(req) || ++deletes > 1) return null;
+            // Google applies the first delete but its answer is lost; meanwhile a writer replaces the object.
+            lock (_backend.Objects) _backend.Objects[$"{Bucket}/doc.txt"] = new FakeFederationBackend.FakeObject(8, 1);
+            return JsonError(HttpStatusCode.ServiceUnavailable, "Backend Error");
+        };
+
+        _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt");
+
+        Assert.Equal(2, _backend.Requests.Count(IsRecordedDelete));
+        Assert.Equal(8, _backend.Objects[$"{Bucket}/doc.txt"].Generation);
+        Assert.Single(_backend.Requests, r => r.Method == HttpMethod.Get && r.Uri.AbsolutePath.EndsWith("/o/doc.txt", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void R5_A_repeated_delete_answered_404_counts_as_deleted()
+    {
+        Seed("doc.txt", 7);
+        int deletes = 0;
+        _backend.StorageResponseOverride = req =>
+        {
+            if (!IsDelete(req) || ++deletes > 1) return null;
+            lock (_backend.Objects) _backend.Objects.Remove($"{Bucket}/doc.txt");
+            return JsonError(HttpStatusCode.ServiceUnavailable, "Backend Error");
+        };
+
+        _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt");
+
+        Assert.Equal(2, _backend.Requests.Count(IsRecordedDelete));
+    }
+
+    [Fact]
+    public void R6_Three_503s_on_a_delete_send_exactly_three_requests()
+    {
+        Seed("doc.txt", 7);
+        _backend.StorageResponseOverride = req => IsDelete(req) ? JsonError(HttpStatusCode.ServiceUnavailable, "Backend Error") : null;
+
+        Assert.ThrowsAny<Exception>(() => _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt"));
+
+        Assert.Equal(3, _backend.Requests.Count(IsRecordedDelete));
+        Assert.True(_backend.Objects.ContainsKey($"{Bucket}/doc.txt"));
+    }
+
+    [Fact]
+    public void R7_A_repeated_metadata_update_answered_412_may_already_be_applied()
+    {
+        Seed("doc.txt", 7);
+        int patches = 0;
+        _backend.StorageResponseOverride = req =>
+        {
+            if (req.Method != HttpMethod.Patch) return null;
+            return ++patches == 1
+                ? JsonError(HttpStatusCode.ServiceUnavailable, "Backend Error")
+                : JsonError(HttpStatusCode.PreconditionFailed, "Precondition Failed");
+        };
+
+        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_UpdateMetadata(ClientCredentials(), Bucket, "doc.txt", "text/csv", "", "", "", Array.Empty<MetadataEntry>()));
+
+        Assert.Contains("may already have been applied", ex.Message);
+        Assert.Contains("Object_GetMetadata", ex.Message);
+        Assert.DoesNotContain("nothing was changed", ex.Message);
+    }
+
+    [Fact]
+    public void R8_A_first_metadata_update_answered_412_changed_nothing()
+    {
+        Seed("doc.txt", 7);
+        _backend.StorageResponseOverride = req => req.Method == HttpMethod.Patch ? JsonError(HttpStatusCode.PreconditionFailed, "Precondition Failed") : null;
+
+        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_UpdateMetadata(ClientCredentials(), Bucket, "doc.txt", "text/csv", "", "", "", Array.Empty<MetadataEntry>()));
+
+        Assert.Contains("nothing was changed", ex.Message);
+    }
+
+    [Fact]
+    public void R9_A_move_whose_repeated_source_delete_answers_412_succeeds()
+    {
+        Seed("src.txt", 7);
+        int deletes = 0;
+        _backend.StorageResponseOverride = req =>
+        {
+            if (!IsDelete(req) || ++deletes > 1) return null;
+            lock (_backend.Objects) _backend.Objects[$"{Bucket}/src.txt"] = new FakeFederationBackend.FakeObject(9, 1);
+            return JsonError(HttpStatusCode.ServiceUnavailable, "Backend Error");
+        };
+
+        _sut.Object_Move(ClientCredentials(), Bucket, "src.txt", Bucket, "dst.txt");
+
+        Assert.Equal(2, _backend.Requests.Count(IsRecordedDelete));
+        Assert.Equal(9, _backend.Objects[$"{Bucket}/src.txt"].Generation);
+    }
+
+    [Fact]
+    public void L1_A_name_with_line_breaks_and_a_direction_override_cannot_forge_log_lines()
+    {
+        const string name = "a\r\nERROR fake line\u202Eexe.txt";
+
+        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Delete(ClientCredentials(), Bucket, name));
+
+        Assert.DoesNotContain('\r', ex.Message);
+        Assert.DoesNotContain('\n', ex.Message);
+        Assert.DoesNotContain('\u202E', ex.Message);
+        Assert.Contains("ERROR fake line", ex.Message);
+    }
+
+    [Fact]
+    public void L2_An_operation_with_a_line_break_is_cleaned_in_the_error()
+    {
+        var ex = Assert.ThrowsAny<Exception>(() =>
+            _sut.Object_GetSignedUrl(ClientCredentials(), Bucket, "a.txt", 5, out _, operation: "Download\nFORGED"));
+
+        Assert.DoesNotContain('\n', ex.Message);
+    }
+
+    [Fact]
+    public void L3_Google_error_text_with_a_line_break_and_an_override_is_cleaned()
+    {
+        _backend.StorageResponseOverride = req => IsObjectGet(req)
+            ? JsonError(HttpStatusCode.Forbidden, "denied\r\nFORGED \u2066x\u2069")
+            : null;
+
+        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_GetMetadata(ClientCredentials(), Bucket, "a.txt", out _, out _, out _));
+
+        Assert.DoesNotContain('\n', ex.Message);
+        Assert.DoesNotContain('\u2066', ex.Message);
+        Assert.Contains("FORGED", ex.Message);
+    }
+
+    [Fact]
+    public void X4_An_unclear_404_on_delete_download_update_and_move_names_the_missing_bucket()
+    {
+        _backend.StorageResponseOverride = req => IsObjectGet(req) || IsBucketGet(req) || IsMediaGet(req) ? JsonError(HttpStatusCode.NotFound, "Not Found") : null;
+
+        var messages = new[]
+        {
+            Assert.ThrowsAny<Exception>(() => _sut.Object_Delete(ClientCredentials(), Bucket, "a.txt")).Message,
+            Assert.ThrowsAny<Exception>(() => _sut.Object_DownloadBinary(ClientCredentials(), Bucket, "a.txt", out _)).Message,
+            Assert.ThrowsAny<Exception>(() => _sut.Object_UpdateMetadata(ClientCredentials(), Bucket, "a.txt", "text/csv", "", "", "", Array.Empty<MetadataEntry>())).Message,
+            Assert.ThrowsAny<Exception>(() => _sut.Object_Move(ClientCredentials(), Bucket, "a.txt", Bucket, "b.txt")).Message,
+        };
+
+        Assert.All(messages, m => Assert.Contains($"Bucket '{Bucket}' does not exist", m));
+    }
+
+    [Fact]
+    public void X5_An_unclear_404_with_an_existing_bucket_still_names_the_missing_object()
+    {
+        _backend.StorageResponseOverride = req => IsObjectGet(req) || IsMediaGet(req) ? JsonError(HttpStatusCode.NotFound, "Not Found") : null;
+
+        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Delete(ClientCredentials(), Bucket, "a.txt"));
+
+        Assert.Contains("Object 'a.txt' was not found", ex.Message);
+    }
 }
