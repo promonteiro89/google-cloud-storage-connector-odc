@@ -10,7 +10,7 @@ using OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures;
 using Xunit;
 using Authentication = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.Authentication;
 using Connector = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.GoogleCloudStorage;
-using GcsFile = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.File;
+using GcsFile = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.BinaryContent;
 
 namespace GoogleCloudStorage.Tests;
 
@@ -95,8 +95,8 @@ public sealed class SafetyTests : IDisposable
         var cases = new (string ExpectedParam, Action<Authentication> Call)[]
         {
             // Empty bucket names
-            ("BucketName", auth => _sut.Object_Upload(auth, "", "obj.txt", sampleFile, [])),
-            ("BucketName", auth => _sut.Object_Download(auth, "", "obj.txt", out _)),
+            ("BucketName", auth => _sut.Object_UploadBinary(auth, "", "obj.txt", sampleFile, [])),
+            ("BucketName", auth => _sut.Object_DownloadBinary(auth, "", "obj.txt", out _)),
             ("BucketName", auth => _sut.Object_Exists(auth, "", "obj.txt", out _)),
             ("BucketName", auth => _sut.Object_GetMetadata(auth, "", "obj.txt", out _, out _, out _)),
             ("BucketName", auth => _sut.Object_Delete(auth, "", "obj.txt")),
@@ -113,8 +113,8 @@ public sealed class SafetyTests : IDisposable
             ("BucketName", auth => _sut.Bucket_Exists(auth, "", out _)),
 
             // Object actions with whitespace object name ("   ") and empty destination object on Move
-            ("ObjectName", auth => _sut.Object_Upload(auth, "test-bucket-alpha", "   ", sampleFile, [])),
-            ("ObjectName", auth => _sut.Object_Download(auth, "test-bucket-alpha", "   ", out _)),
+            ("ObjectName", auth => _sut.Object_UploadBinary(auth, "test-bucket-alpha", "   ", sampleFile, [])),
+            ("ObjectName", auth => _sut.Object_DownloadBinary(auth, "test-bucket-alpha", "   ", out _)),
             ("ObjectName", auth => _sut.Object_Exists(auth, "test-bucket-alpha", "   ", out _)),
             ("ObjectName", auth => _sut.Object_GetMetadata(auth, "test-bucket-alpha", "   ", out _, out _, out _)),
             ("ObjectName", auth => _sut.Object_Delete(auth, "test-bucket-alpha", "   ")),

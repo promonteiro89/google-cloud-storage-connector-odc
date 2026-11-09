@@ -10,7 +10,7 @@ using OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures;
 using Xunit;
 using Authentication = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.Authentication;
 using Connector = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.GoogleCloudStorage;
-using GcsFile = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.File;
+using GcsFile = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.BinaryContent;
 
 namespace GoogleCloudStorage.Tests;
 
@@ -273,7 +273,7 @@ public sealed class ActionHardeningTests : IDisposable
         SeedContent("big.bin", bytes);
         _backend.StorageResponseOverride = FailFirst(IsMediaGet, HttpStatusCode.ServiceUnavailable);
 
-        _sut.Object_Download(ClientCredentials(), Bucket, "big.bin", out var file);
+        _sut.Object_DownloadBinary(ClientCredentials(), Bucket, "big.bin", out var file);
 
         Assert.Equal(bytes, file.Content);
         Assert.Equal(2, _backend.Requests.Count(IsRecordedMediaGet));
@@ -285,7 +285,7 @@ public sealed class ActionHardeningTests : IDisposable
         SeedContent("big.bin", new byte[10]);
         _backend.StorageResponseOverride = req => IsMediaGet(req) ? JsonError(HttpStatusCode.ServiceUnavailable, "Transient backend error") : null;
 
-        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Download(ClientCredentials(), Bucket, "big.bin", out _));
+        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_DownloadBinary(ClientCredentials(), Bucket, "big.bin", out _));
 
         Assert.Contains("503", ex.Message);
         Assert.Equal(3, _backend.Requests.Count(IsRecordedMediaGet));
@@ -297,7 +297,7 @@ public sealed class ActionHardeningTests : IDisposable
         SeedContent("big.bin", new byte[10]);
         _backend.StorageResponseOverride = req => IsMediaGet(req) ? JsonError(HttpStatusCode.BadRequest, "Bad request") : null;
 
-        Assert.ThrowsAny<Exception>(() => _sut.Object_Download(ClientCredentials(), Bucket, "big.bin", out _));
+        Assert.ThrowsAny<Exception>(() => _sut.Object_DownloadBinary(ClientCredentials(), Bucket, "big.bin", out _));
 
         Assert.Single(_backend.Requests, IsRecordedMediaGet);
     }
@@ -312,7 +312,7 @@ public sealed class ActionHardeningTests : IDisposable
         SeedContent("zipped.txt", compressed.ToArray());
         _backend.GzipTranscoded.Add($"{Bucket}/zipped.txt");
 
-        _sut.Object_Download(ClientCredentials(), Bucket, "zipped.txt", out var file);
+        _sut.Object_DownloadBinary(ClientCredentials(), Bucket, "zipped.txt", out var file);
 
         Assert.Equal(plain, file.Content);
     }
@@ -325,7 +325,7 @@ public sealed class ActionHardeningTests : IDisposable
         _backend.StorageResponseOverride = FailFirst(IsSessionPost, HttpStatusCode.ServiceUnavailable);
         var bytes = new byte[] { 1, 2, 3, 4, 5, 6 };
 
-        _sut.Object_Upload(ClientCredentials(), Bucket, "up.bin", new GcsFile { Content = bytes, ContentType = "application/octet-stream" }, []);
+        _sut.Object_UploadBinary(ClientCredentials(), Bucket, "up.bin", new GcsFile { Content = bytes, ContentType = "application/octet-stream" }, []);
 
         Assert.Equal(bytes, _backend.StoredObjects[$"{Bucket}/up.bin"]);
         Assert.Equal(2, _backend.Requests.Count(IsRecordedSessionPost));
@@ -335,7 +335,7 @@ public sealed class ActionHardeningTests : IDisposable
     public void UP2_Upload_rejects_a_content_type_with_line_breaks_before_any_request()
     {
         var ex = Assert.Throws<ArgumentException>(() =>
-            _sut.Object_Upload(ClientCredentials(), Bucket, "up.txt", new GcsFile { Content = [1], ContentType = "text/plain\r\nX-Evil: 1" }, []));
+            _sut.Object_UploadBinary(ClientCredentials(), Bucket, "up.txt", new GcsFile { Content = [1], ContentType = "text/plain\r\nX-Evil: 1" }, []));
 
         Assert.Contains("ContentType cannot contain line breaks", ex.Message);
         Assert.Empty(_backend.Requests);
@@ -439,7 +439,7 @@ public sealed class ActionHardeningTests : IDisposable
         SeedContent("big.bin", new byte[10]);
         _backend.StorageResponseOverride = req => IsMediaGet(req) ? throw new TaskCanceledException("simulated 80-second timeout") : null;
 
-        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Download(ClientCredentials(), Bucket, "big.bin", out _));
+        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_DownloadBinary(ClientCredentials(), Bucket, "big.bin", out _));
 
         Assert.IsNotType<AggregateException>(ex);
         Assert.Contains("timed out", ex.Message);

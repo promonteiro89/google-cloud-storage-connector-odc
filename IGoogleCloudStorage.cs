@@ -6,20 +6,36 @@ namespace OutSystems.ExternalLibraries.GoogleCloudStorage_Connector;
 [OSInterface(Description = "Google Cloud Storage connector for ODC.", Name = "GoogleCloudStorage_Connector", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.app_icon.png")]
 public interface IGoogleCloudStorage
 {
-    [OSAction(Description = "Uploads an object to a bucket, optionally with custom key-value metadata.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    [OSAction(Description = "Uploads an ODC File to a bucket, streaming it from ODC storage (up to 2 GB, ODC's File limit), optionally with custom key-value metadata. The upload must finish within the action's 85-second deadline: about 1 GB fits when the bucket is near the ODC region, less when it is far away. Use Object_GetSignedUrl for larger files.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_Upload(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "Bucket Name")] string bucketName,
         [OSParameter(Description = "Object Name")] string objectName,
-        [OSParameter(Description = "File to upload")] OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.File file,
+        [OSParameter(Description = "The File to upload (for example from an Upload widget or an entity attribute)")] IOSFile file,
+        [OSParameter(Description = "Optional MIME type to store (e.g. application/pdf). Empty = the File's own MIME type.")] string contentType,
         [OSParameter(Description = "Optional custom key-value metadata to store with the object (e.g. user id, tenant, document type). Retrievable via Object_GetMetadata. Leave empty for none.")] IEnumerable<MetadataEntry> metadata);
 
-    [OSAction(Description = "Downloads an object from a bucket. Objects larger than 5.5 MB (the ODC action payload limit) are refused: use Object_GetSignedUrl to let the client download them directly from Google.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    [OSAction(Description = "Downloads an object into a new ODC File, streaming it into ODC storage (up to 2 GB, ODC's File limit). The File is temporary: save it to an entity attribute to keep it. The download must finish within the action's 85-second deadline.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_Download(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "Bucket Name")] string bucketName,
         [OSParameter(Description = "Object Name")] string objectName,
-        [OSParameter(Description = "The downloaded file")] out OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.File file);
+        [OSParameter(Description = "The downloaded File, named after the last part of the object name")] out IOSFile file);
+
+    [OSAction(Description = "Uploads content held in memory (Binary Data, at most 5.5 MB, ODC's action input limit) to a bucket, optionally with custom key-value metadata. Use it for content your app builds in memory, or on ODC Self-Hosted, which has no File type; otherwise prefer Object_Upload.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    void Object_UploadBinary(
+        [OSParameter(Description = "Authentication credentials")] Authentication authentication,
+        [OSParameter(Description = "Bucket Name")] string bucketName,
+        [OSParameter(Description = "Object Name")] string objectName,
+        [OSParameter(Description = "The content and its MIME type")] BinaryContent content,
+        [OSParameter(Description = "Optional custom key-value metadata to store with the object (e.g. user id, tenant, document type). Retrievable via Object_GetMetadata. Leave empty for none.")] IEnumerable<MetadataEntry> metadata);
+
+    [OSAction(Description = "Downloads an object into memory as Binary Data. Objects larger than 5.5 MB (the ODC action payload limit) are refused: use Object_Download, or Object_GetSignedUrl to let the client download them directly from Google.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    void Object_DownloadBinary(
+        [OSParameter(Description = "Authentication credentials")] Authentication authentication,
+        [OSParameter(Description = "Bucket Name")] string bucketName,
+        [OSParameter(Description = "Object Name")] string objectName,
+        [OSParameter(Description = "The downloaded content and its MIME type")] out BinaryContent content);
 
     [OSAction(Description = "Lists objects in a bucket, optionally filtered by prefix, with support for pagination (MaxResults/PageToken) and folder-style navigation (Delimiter).", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_List(

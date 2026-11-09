@@ -5,7 +5,9 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Runtime.ExceptionServices;
-using File = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.File;
+using OutSystems.ExternalLibraries.SDK;
+using OutSystems.ExternalLibraries.SDK.FileStorage;
+using OutSystems.ExternalLibraries.SDK.FileStorage.Exceptions;
 using Object = OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures.Object;
 
 namespace OutSystems.ExternalLibraries.GoogleCloudStorage_Connector;
@@ -43,17 +45,105 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     /// </summary>
     internal static TimeSpan[] TransferRetryDelays { get; set; } = { TimeSpan.FromMilliseconds(500), TimeSpan.FromSeconds(1) };
 
+    /// <summary>
+    /// The largest File ODC can store (2 GB). Object_Download refuses a larger object before it starts.
+    /// </summary>
+    internal const long MaxFileBytes = 2_147_483_648;
+
+    /// <summary>
+    /// The chunk size of a File upload. Google confirms each chunk before the next one is sent, so larger
+    /// chunks mean fewer waits: on ODC, 32 MB chunks sent 200 MB to a nearby bucket in about 10 s, against
+    /// 14 s with the SDK's 10 MB default (and 22 s against 39 s to a bucket on another continent). Each
+    /// upload holds one chunk in memory. Test seam.
+    /// </summary>
+    internal static int UploadChunkSize { get; set; } = 32 * 1024 * 1024;
+
+    /// <summary>
+    /// The longest one File upload or download may run, retries included. It cancels the transfer in
+    /// flight, so a large file fails with a clear message before ODC kills the action at 95 seconds. Test seam.
+    /// </summary>
+    internal static TimeSpan FileTransferDeadline { get; set; } = TimeSpan.FromSeconds(85);
+
     /// <summary>No transfer retry starts after this much time, so retries never push a call past ODC's 95 seconds.</summary>
     private static readonly TimeSpan TransferRetryWindow = TimeSpan.FromSeconds(40);
 
-    public void Object_Upload(Authentication authentication, string bucketName, string objectName, File file, IEnumerable<MetadataEntry> metadata)
+    public void Object_Upload(Authentication authentication, string bucketName, string objectName, IOSFile file, string contentType, IEnumerable<MetadataEntry> metadata)
+    {
+        Require(bucketName, "BucketName");
+        Require(objectName, "ObjectName");
+        RequireFile(file);
+        var type = string.IsNullOrEmpty(contentType) ? file.ContentType : contentType;
+        RejectLineBreaks(type);
+
+        var storageClient = GetStorageClient(authentication);
+        var fileStorage = FileStorage.GetInstance();
+        using var deadline = new CancellationTokenSource(FileTransferDeadline);
+        try
+        {
+            var gcsObject = new Google.Apis.Storage.v1.Data.Object
+            {
+                Bucket = bucketName,
+                Name = objectName,
+                ContentType = string.IsNullOrEmpty(type) ? null : type,
+                Metadata = ToMetadataDictionary(metadata)
+            };
+            var options = new UploadObjectOptions { ChunkSize = UploadChunkSize };
+
+            // Streams from ODC storage to Google, one chunk in memory at a time. Each attempt reopens the File.
+            WithTransferRetry(() =>
+            {
+                using var source = fileStorage.ReadFileAsStreamAsync(file, deadline.Token).GetAwaiter().GetResult();
+                return storageClient.UploadObjectAsync(gcsObject, source, options, deadline.Token).GetAwaiter().GetResult();
+            });
+        }
+        catch (OperationCanceledException e) when (deadline.IsCancellationRequested)
+        {
+            throw new Exception($"Uploading '{objectName}' ({FormatBytes(file.Size)}) did not finish within {FileTransferDeadline.TotalSeconds:0} seconds, the most an ODC action can spend on it; nothing was stored. A bucket in or near your ODC region is several times faster; for files this large, upload with Object_GetSignedUrl (Operation 'Upload') instead.", e);
+        }
+        catch (FileStorageException e) { throw FileStorageFailure(e); }
+        catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, null); }
+    }
+
+    public void Object_Download(Authentication authentication, string bucketName, string objectName, out IOSFile file)
     {
         Require(bucketName, "BucketName");
         Require(objectName, "ObjectName");
 
-        // A line break would inject extra headers into the upload request.
-        if (file.ContentType != null && (file.ContentType.Contains('\r') || file.ContentType.Contains('\n')))
-            throw new ArgumentException("ContentType cannot contain line breaks.");
+        var storageClient = GetStorageClient(authentication);
+        var fileStorage = FileStorage.GetInstance();
+        using var deadline = new CancellationTokenSource(FileTransferDeadline);
+        try
+        {
+            // Read the size and type first: refuse what ODC cannot store before transferring anything.
+            var obj = storageClient.GetObjectAsync(bucketName, objectName, null, deadline.Token).GetAwaiter().GetResult();
+            if (obj.Size > (ulong)MaxFileBytes)
+                throw new Exception($"Object '{objectName}' is {FormatBytes((long)obj.Size!.Value)}, larger than the 2 GB an ODC File can hold. Use Object_GetSignedUrl with Operation 'Download' and let the client download it directly from Google.");
+
+            var name = FileNameFor(objectName);
+            var type = string.IsNullOrEmpty(obj.ContentType) ? "application/octet-stream" : obj.ContentType;
+            var options = new DownloadObjectOptions { DownloadValidationMode = DownloadValidationMode.Automatic };
+
+            // Streams from Google into ODC storage, checking Google's CRC32C. A failed attempt leaves only
+            // a temporary File, which ODC deletes by itself.
+            file = WithTransferRetry(() => fileStorage.CreateFileFromWriterAsync(name, type, async (target, ct) =>
+            {
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
+                await storageClient.DownloadObjectAsync(bucketName, objectName, target, options, linked.Token);
+            }, null, deadline.Token).GetAwaiter().GetResult());
+        }
+        catch (OperationCanceledException e) when (deadline.IsCancellationRequested)
+        {
+            throw new Exception($"Downloading '{objectName}' did not finish within {FileTransferDeadline.TotalSeconds:0} seconds, the most an ODC action can spend on it. A bucket in or near your ODC region is several times faster; for objects this large, use Object_GetSignedUrl (Operation 'Download') and let the client download it directly from Google.", e);
+        }
+        catch (FileStorageException e) { throw FileStorageFailure(e); }
+        catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, objectName); }
+    }
+
+    public void Object_UploadBinary(Authentication authentication, string bucketName, string objectName, BinaryContent content, IEnumerable<MetadataEntry> metadata)
+    {
+        Require(bucketName, "BucketName");
+        Require(objectName, "ObjectName");
+        RejectLineBreaks(content.ContentType);
 
         var storageClient = GetStorageClient(authentication);
         try
@@ -62,22 +152,22 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
             {
                 Bucket = bucketName,
                 Name = objectName,
-                ContentType = string.IsNullOrEmpty(file.ContentType) ? null : file.ContentType,
+                ContentType = string.IsNullOrEmpty(content.ContentType) ? null : content.ContentType,
                 Metadata = ToMetadataDictionary(metadata)
             };
 
             // Opening the resumable session is not retried by the SDK; each attempt re-reads the same bytes.
-            var content = file.Content ?? Array.Empty<byte>();
+            var bytes = content.Content ?? Array.Empty<byte>();
             WithTransferRetry(() =>
             {
-                using var stream = new MemoryStream(content);
+                using var stream = new MemoryStream(bytes);
                 return storageClient.UploadObject(gcsObject, stream);
             });
         }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, null); }
     }
 
-    public void Object_Download(Authentication authentication, string bucketName, string objectName, out File file)
+    public void Object_DownloadBinary(Authentication authentication, string bucketName, string objectName, out BinaryContent content)
     {
         Require(bucketName, "BucketName");
         Require(objectName, "ObjectName");
@@ -86,13 +176,13 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         try
         {
             // DownloadObject has no retry options of its own; every attempt starts with a fresh buffer.
-            file = WithTransferRetry(() =>
+            content = WithTransferRetry(() =>
             {
                 using var stream = new CappedDownloadStream();
                 var obj = storageClient.DownloadObject(bucketName, objectName, stream,
                     new DownloadObjectOptions { DownloadValidationMode = DownloadValidationMode.Automatic });
 
-                return new File
+                return new BinaryContent
                 {
                     Content = stream.ToArray(),
                     ContentType = obj.ContentType ?? ""
@@ -102,7 +192,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         catch (Exception e) when (FindInChain<DownloadTooLargeException>(e) != null)
         {
             // The SDK may wrap whatever the target stream throws, so look through the chain.
-            throw new Exception($"Object '{objectName}' is larger than {MaxDownloadBytes} bytes (5.5 MB), the most an ODC action can return. Use Object_GetSignedUrl with Operation 'Download' and let the client download it directly from Google.");
+            throw new Exception($"Object '{objectName}' is larger than {MaxDownloadBytes} bytes (5.5 MB), the most an ODC action can return as Binary Data. Use Object_Download to get it as a File, or Object_GetSignedUrl with Operation 'Download' to let the client download it directly from Google.");
         }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, objectName); }
     }
@@ -617,6 +707,41 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         if (string.IsNullOrWhiteSpace(value))
             throw new ArgumentException($"{name} cannot be empty.");
     }
+
+    /// <summary>
+    /// Rejects a missing File (null, or ODC's NullFile(), which has no storage key) before any request.
+    /// </summary>
+    private static void RequireFile(IOSFile? file)
+    {
+        if (file == null || string.IsNullOrEmpty(file.Key))
+            throw new ArgumentException("File cannot be empty. Pass a File from an Upload widget, an entity attribute or another action.");
+    }
+
+    /// <summary>A line break in a content type would inject extra headers into the upload request.</summary>
+    private static void RejectLineBreaks(string? contentType)
+    {
+        if (contentType != null && (contentType.Contains('\r') || contentType.Contains('\n')))
+            throw new ArgumentException("ContentType cannot contain line breaks.");
+    }
+
+    /// <summary>
+    /// The name of a downloaded File: the last part of the object name ("reports/2026/q1.pdf" gives
+    /// "q1.pdf"), or "download" when the name ends with '/'. Cut to 200 characters, well inside the
+    /// 1,500 bytes ODC allows for a File's metadata.
+    /// </summary>
+    internal static string FileNameFor(string objectName)
+    {
+        var name = objectName.TrimEnd('/');
+        name = name.Length == 0 || objectName.EndsWith('/') ? "download" : name[(name.LastIndexOf('/') + 1)..];
+        return name.Length > 200 ? name[..200] : name;
+    }
+
+    private static string FormatBytes(long bytes) =>
+        bytes >= 1024 * 1024 ? $"{bytes / 1048576.0:0.#} MB" : $"{bytes} bytes";
+
+    /// <summary>ODC storage refused to read or create a File (for example a temporary File that expired).</summary>
+    private static Exception FileStorageFailure(FileStorageException e) =>
+        new Exception($"ODC file storage failed: {e.Message}", e);
 
     /// <summary>
     /// Runs one upload or download attempt, retrying transient failures (408, 429, 500, 502, 503, 504,

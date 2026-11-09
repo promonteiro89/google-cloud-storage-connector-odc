@@ -4,6 +4,62 @@ All notable changes to the **Google Cloud Storage Connector for ODC** are docume
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - Unreleased
+
+`Object_Upload` and `Object_Download` now work with ODC's **File** data type, so files are no longer limited by ODC's 5.5 MB action payload: they stream between ODC storage and Google, up to 2 GB. The Binary Data behaviour of 1.x stays available under new names. This is a breaking release: apps must update their calls (see **Migrating from 1.x**).
+
+### Breaking changes
+
+- **`Object_Upload` takes an ODC File** (from an Upload widget, an entity attribute or another action) and a new optional `ContentType` input. Empty means the File's own type.
+- **`Object_Download` returns an ODC File.** The File is named after the last part of the object name and is temporary until the app saves it to an entity attribute.
+- **The 1.x actions are renamed:** the in-memory versions are now `Object_UploadBinary` and `Object_DownloadBinary`, with the same 5.5 MB limit.
+- **The `File` structure is renamed `BinaryContent`,** so it is no longer confused with ODC's File type in ODC Studio.
+
+### Added
+
+- **Large files through the connector.** On an ODC tenant:
+  - **Uploads:** 200 MB took about 10 s to a bucket in a nearby region, and 22 s to one on another continent. 1 GB took 40 s to a nearby bucket.
+  - **Downloads:** 200 MB took about 13 s.
+  - **Integrity:** the content matched byte for byte in every run.
+- **Uploads use 32 MB chunks.** Google confirms each chunk before the next one is sent, so larger chunks mean fewer waits. On ODC this was 1.4 to 2 times faster than the SDK's 10 MB default. Each upload holds one chunk in memory.
+- **A clear error before ODC's 95-second limit.** A File upload or download that has not finished after 85 seconds, retries included, stops with a message, and nothing is stored. A download larger than 2 GB, the most an ODC File holds, is refused before any transfer. Both messages point to `Object_GetSignedUrl` for larger files.
+- **Retries:**
+  - an interrupted upload chunk is resent;
+  - a failed upload start reopens the File and tries again;
+  - downloads retry transient errors (408, 429, 5xx, network) as before, up to 3 attempts.
+- **Download integrity:** downloads into a File check Google's CRC32C, as `Object_DownloadBinary` does.
+
+### Packaging
+
+- **The release zip now includes `OutSystems.ExternalLibraries.SDK.dll`.** ODC rejects a library with File parameters without it ("IOSFile could not be found", OS-ELGW-40004). The README and the NuGet-update instructions say so. The new dependency `OutSystems.ExternalLibraries.SDK.FileStorage` 1.2.1 is also in the zip.
+
+### Migrating from 1.x
+
+1. **Upload widget or entity File:** replace the 1.x `Object_Upload` call with the new `Object_Upload` and pass the File. There is no need to read its content into Binary Data first.
+2. **Content built in memory** (generated PDFs, CSVs, REST responses), **or ODC Self-Hosted** (which has no File type): call `Object_UploadBinary` / `Object_DownloadBinary`, and rename the `File` structure to `BinaryContent` in your logic.
+3. **Downloads:** either keep the content in memory with `Object_DownloadBinary`, or switch to `Object_Download` and save the returned File to an entity, or hand it to the browser with ODC's `GetFileSignedURL`.
+
+### Known limits
+
+- **Browser uploads need a signed-in user.** ODC rejects an anonymous upload to a File with 401.
+- **Long transfers started from a screen:** ODC limits the server call to 60 seconds, so start very large transfers from a Timer or a Workflow.
+- **ODC Self-Hosted:** untested. File doesn't exist there, so the File actions can't be used, and whether ODC Self-Hosted accepts a library that declares them is not yet verified.
+
+### Tests
+
+- 186 tests (169 in 1.7.2). The offline fake of Google now handles uploads sent in several chunks and resumed after a failure. A new in-memory fake of ODC's file storage covers:
+  - chunked uploads;
+  - the content-type override;
+  - an empty File;
+  - resumed and retried uploads;
+  - the 85-second deadline both ways;
+  - an ODC storage failure;
+  - downloads into a File;
+  - the 2 GB refusal;
+  - a missing object;
+  - File names.
+- Breaking the 2 GB check, the chunk size or the reopen-on-retry makes a test fail.
+
 ## [1.7.2] - 2026-11-09
 
 Hardening release from six independent reviews of 1.7.1 and a cross-check with the O11 connector: uploads, downloads and deletes survive transient Google errors, `Object_DeleteByPrefix` keeps to ODC's time limit on any prefix size, and identity-provider errors can no longer carry secrets into logs. No action, input or output changed.
