@@ -4,7 +4,37 @@ All notable changes to the **Google Cloud Storage Connector for ODC** are docume
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] - Unreleased
+## [2.0.1] - Unreleased
+
+Fixes from the four reviews of the O11 connector's 1.7.3, checked against this connector. No action, input or output changes: a drop-in replacement for 2.0.0.
+
+### Fixed
+
+- **`Object_Delete` reported "nothing was deleted" after a delete that had worked.** When Google applied a delete but its answer was lost, the repeated request answered 412, or 404 if the object was gone, and the action reported a failure. The connector now repeats the delete itself, with the Storage library's retry off, and treats a 412 or 404 on a repeat as deleted. A newer object written meanwhile is never touched. A 412 on the first request still reports that the object was replaced and nothing was deleted.
+- **`Object_UpdateMetadata` said "nothing was changed" when only a repeat got a 412.** The first request may have been applied, so the message now says the update "may already have been applied" and asks to read the metadata before retrying.
+- **`Object_Move` reported a failed source delete when only a repeat got a 412.** In that case the source was in fact deleted, so the move now succeeds.
+- **Error messages could forge lines in the ODC error log.** Object names, prefixes, `Operation`, `AuthenticationMethod` and Google's error text went into messages unchanged. They are now cleaned: line breaks, other control characters and invisible text-direction characters (such as U+202E) become spaces, and each value is cut at 500 characters.
+- **A URL-encoded `ClientSecret` was not masked.** If the identity provider echoed the secret back URL-encoded, it appeared in the error. Plain and URL-encoded forms are now masked.
+- **The identity provider connection kept cookies.** It is shared by every app that uses the library, so a cookie the provider set for one app's request went with another's. Cookies are now off.
+- **A token request could take about 120 seconds.** The 30-second limit applied separately to the headers and the body of each request, and the HTTP Basic retry doubled it. That passed ODC's 95-second action limit, so ODC killed the action without the connector's message. One 30-second deadline now covers the whole exchange.
+- **A plain "Not Found" from an emulator or a proxy turned a missing bucket into a missing object** in `Object_Delete`, `Object_Download`, `Object_DownloadBinary`, `Object_UpdateMetadata`, `Object_Move` and `Object_Copy`. As `Object_Exists` and `Object_GetMetadata` already did, an unclear 404 is now settled by looking up the bucket.
+
+### Tests
+
+- 201 tests (186 in 2.0.0).
+- **New tests:**
+  - a repeated delete answered 412 (the newer object stays) or 404;
+  - three 503s on a delete (exactly three requests);
+  - the two `Object_UpdateMetadata` 412 messages;
+  - a repeated `Object_Move` source delete;
+  - a log-forging object name, `Operation` and Google error text;
+  - a URL-encoded secret, in both encodings;
+  - the identity provider client's settings;
+  - one deadline across both client-authentication attempts;
+  - an unclear 404 on five actions, settled either way.
+- **Each fix is proven:** breaking the resend tracking, the message cleaning, the encoded-secret masking, the cookie setting, the bucket check or the shared deadline makes a test fail.
+
+## [2.0.0] - 2026-11-09
 
 `Object_Upload` and `Object_Download` now work with ODC's **File** data type, so files are no longer limited by ODC's 5.5 MB action payload: they stream between ODC storage and Google, up to 2 GB. The Binary Data behaviour of 1.x stays available under new names. This is a breaking release: apps must update their calls (see **Migrating from 1.x**).
 
@@ -29,17 +59,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - downloads retry transient errors (408, 429, 5xx, network) as before, up to 3 attempts.
 - **Download integrity:** downloads into a File check Google's CRC32C, as `Object_DownloadBinary` does.
 
-### Fixed (from the O11 connector's 1.7.4 reviews)
-
-- **`Object_Delete` reported "nothing was deleted" after a delete that had worked.** When Google applied a delete but its answer was lost, the repeated request answered 412, or 404 if the object was gone, and the action reported a failure. The connector now repeats the delete itself, with the Storage library's retry off, and treats a 412 or 404 on a repeat as deleted. A newer object written meanwhile is never touched. A 412 on the first request still reports that the object was replaced and nothing was deleted.
-- **`Object_UpdateMetadata` said "nothing was changed" when only a repeat got a 412.** The first request may have been applied, so the message now says the update "may already have been applied" and asks to read the metadata before retrying.
-- **`Object_Move` reported a failed source delete when only a repeat got a 412.** In that case the source was in fact deleted, so the move now succeeds.
-- **Error messages could forge lines in the ODC error log.** Object names, prefixes, `Operation`, `AuthenticationMethod` and Google's error text went into messages unchanged. They are now cleaned: line breaks, other control characters and invisible text-direction characters (such as U+202E) become spaces, and each value is cut at 500 characters.
-- **A URL-encoded `ClientSecret` was not masked.** If the identity provider echoed the secret back URL-encoded, it appeared in the error. Plain and URL-encoded forms are now masked.
-- **The identity provider connection kept cookies.** It is shared by every app that uses the library, so a cookie the provider set for one app's request went with another's. Cookies are now off.
-- **A token request could take about 120 seconds.** The 30-second limit applied separately to the headers and the body of each request, and the HTTP Basic retry doubled it. That passed ODC's 95-second action limit, so ODC killed the action without the connector's message. One 30-second deadline now covers the whole exchange.
-- **A plain "Not Found" from an emulator or a proxy turned a missing bucket into a missing object** in `Object_Delete`, `Object_Download`, `Object_DownloadBinary`, `Object_UpdateMetadata`, `Object_Move` and `Object_Copy`. As `Object_Exists` and `Object_GetMetadata` already did, an unclear 404 is now settled by looking up the bucket.
-
 ### Packaging
 
 - **The release zip now includes `OutSystems.ExternalLibraries.SDK.dll`.** ODC rejects a library with File parameters without it ("IOSFile could not be found", OS-ELGW-40004). The README and the NuGet-update instructions say so. The new dependency `OutSystems.ExternalLibraries.SDK.FileStorage` 1.2.1 is also in the zip.
@@ -58,7 +77,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Tests
 
-- 201 tests (169 in 1.7.2). The offline fake of Google now handles uploads sent in several chunks and resumed after a failure. A new in-memory fake of ODC's file storage covers:
+- 186 tests (169 in 1.7.2). The offline fake of Google now handles uploads sent in several chunks and resumed after a failure. A new in-memory fake of ODC's file storage covers:
   - chunked uploads;
   - the content-type override;
   - an empty File;
@@ -69,17 +88,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - the 2 GB refusal;
   - a missing object;
   - File names.
-- **New tests for the 1.7.4 fixes:**
-  - a repeated delete answered 412 (the newer object stays) or 404;
-  - three 503s on a delete (exactly three requests);
-  - the two `Object_UpdateMetadata` 412 messages;
-  - a repeated `Object_Move` source delete;
-  - a log-forging object name, `Operation` and Google error text;
-  - a URL-encoded secret, in both encodings;
-  - the identity provider client's settings;
-  - one deadline across both client-authentication attempts;
-  - an unclear 404 on five actions, settled either way.
-- **Each fix is proven:** breaking the 2 GB check, the chunk size, the reopen-on-retry, the resend tracking, the message cleaning, the encoded-secret masking, the cookie setting, the bucket check or the shared deadline makes a test fail.
+- Breaking the 2 GB check, the chunk size or the reopen-on-retry makes a test fail.
 
 ## [1.7.2] - 2026-11-09
 
