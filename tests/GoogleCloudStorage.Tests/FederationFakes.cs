@@ -67,6 +67,13 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
     /// <summary>Objects served by `GET /storage/v1/b/{bucket}/o/{object}` (and accepted by PUT).</summary>
     public Dictionary<string, FakeObject> Objects { get; } = new();
 
+    /// <summary>
+    /// Keys (as "bucket/name") of objects stored gzip-compressed in <see cref="StoredObjects"/>. Like real
+    /// GCS under decompressive transcoding, a media GET serves the decompressed bytes with
+    /// `x-goog-stored-content-encoding: gzip` and the CRC32C of the compressed bytes.
+    /// </summary>
+    public HashSet<string> GzipTranscoded { get; } = new();
+
     /// <summary>When true, every object update (`PUT`/`PATCH .../o/{object}`) answers 412 Precondition Failed.</summary>
     public bool FailObjectUpdateWithPrecondition { get; set; }
 
@@ -138,10 +145,13 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
             return Json(HttpStatusCode.OK, new { keyId = "fake-key", signedBlob = Convert.ToBase64String(SignatureBytes) });
         }
 
-        if (url.StartsWith("https://storage.googleapis.com/", StringComparison.Ordinal)
-            && StorageResponseOverride?.Invoke(request) is { } storageOverride)
+        if (url.StartsWith("https://storage.googleapis.com/", StringComparison.Ordinal) && StorageResponseOverride is { } storageHook)
         {
-            return storageOverride;
+            // Run the hook off the request thread and stop waiting when the request is cancelled, as a real
+            // slow server would be: a hook that sleeps cannot hold a cancelled request open.
+            var hookResult = await Task.Run(() => storageHook(request), CancellationToken.None).WaitAsync(cancellationToken);
+            if (hookResult is { } storageOverride)
+                return storageOverride;
         }
 
         if (url.StartsWith("https://storage.googleapis.com/upload/storage/v1/b/", StringComparison.Ordinal))
@@ -161,9 +171,15 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
             string srcKey = srcBucket + "/" + srcObject;
             string dstKey = dstBucket + "/" + dstObject;
 
-            FakeObject copied = Objects.TryGetValue(srcKey, out var srcExisting)
-                ? srcExisting
-                : new FakeObject(Generation: 1, Metageneration: 1);
+            var rewriteQuery = System.Web.HttpUtility.ParseQueryString(request.RequestUri!.Query);
+            if (!Objects.TryGetValue(srcKey, out var srcExisting))
+                return Json(HttpStatusCode.NotFound, new { error = new { code = 404, message = $"No such object: {srcKey}" } });
+            if (rewriteQuery["ifSourceGenerationMatch"] is { } expectedSource
+                && expectedSource != srcExisting.Generation.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                return Json(HttpStatusCode.PreconditionFailed, new { error = new { code = 412, message = "At least one of the pre-conditions you specified did not hold." } });
+
+            // The destination is a new object, so it gets a new generation.
+            FakeObject copied = srcExisting with { Generation = srcExisting.Generation + 1000 };
             lock (Objects) Objects[dstKey] = copied;
             return Json(HttpStatusCode.OK, new
             {
@@ -179,18 +195,65 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
             && segments.Length == 5 && segments[4] == "o")
         {
             string bucket = segments[3];
-            string prefix = System.Web.HttpUtility.ParseQueryString(request.RequestUri!.Query)["prefix"] ?? "";
+            var listQuery = System.Web.HttpUtility.ParseQueryString(request.RequestUri!.Query);
+            string prefix = listQuery["prefix"] ?? "";
             string bucketPrefix = bucket + "/" + prefix;
-            object[] items;
+            string? pageToken = listQuery["pageToken"];
+            int maxResults = int.TryParse(listQuery["maxResults"], out var parsedMax) && parsedMax > 0 ? parsedMax : int.MaxValue;
+            List<(string Name, FakeObject Obj)> matching;
             lock (Objects)
             {
-                items = Objects
+                // Like GCS, a page token is positional: it resumes after the last name returned.
+                matching = Objects
                     .Where(kv => kv.Key.StartsWith(bucketPrefix, StringComparison.Ordinal))
-                    .OrderBy(kv => kv.Key, StringComparer.Ordinal)
-                    .Select(kv => ObjectJson(bucket, kv.Key[(bucket.Length + 1)..], kv.Value))
-                    .ToArray();
+                    .Select(kv => (Name: kv.Key[(bucket.Length + 1)..], Obj: kv.Value))
+                    .Where(o => pageToken == null || string.CompareOrdinal(o.Name, pageToken) > 0)
+                    .OrderBy(o => o.Name, StringComparer.Ordinal)
+                    .ToList();
             }
-            return Json(HttpStatusCode.OK, new { kind = "storage#objects", items });
+            var page = matching.Take(maxResults).ToList();
+            object[] items = page.Select(o => ObjectJson(bucket, o.Name, o.Obj)).ToArray();
+            string? nextPageToken = matching.Count > page.Count ? page[^1].Name : null;
+            var listing = new Dictionary<string, object> { ["kind"] = "storage#objects", ["items"] = items };
+            if (nextPageToken != null) listing["nextPageToken"] = nextPageToken;
+            return Json(HttpStatusCode.OK, listing);
+        }
+
+        // Media download (the SDK's alt=media GET): serves the stored bytes with the headers the SDK validates.
+        if (url.StartsWith("https://storage.googleapis.com/", StringComparison.Ordinal)
+            && request.Method == HttpMethod.Get
+            && System.Web.HttpUtility.ParseQueryString(request.RequestUri!.Query)["alt"] == "media"
+            && Array.IndexOf(segments, "b") is var bIndex and >= 0 && segments.Length > bIndex + 3 && segments[bIndex + 2] == "o")
+        {
+            string mediaKey = segments[bIndex + 1] + "/" + Uri.UnescapeDataString(string.Join('/', segments.Skip(bIndex + 3)));
+            byte[]? stored;
+            lock (StoredObjects) StoredObjects.TryGetValue(mediaKey, out stored);
+            if (stored == null || !Objects.TryGetValue(mediaKey, out var mediaObject))
+                return Json(HttpStatusCode.NotFound, new { error = new { code = 404, message = $"No such object: {mediaKey}" } });
+
+            bool transcoded = GzipTranscoded.Contains(mediaKey);
+            byte[] served = stored;
+            if (transcoded)
+            {
+                using var gunzip = new System.IO.Compression.GZipStream(new MemoryStream(stored), System.IO.Compression.CompressionMode.Decompress);
+                using var plain = new MemoryStream();
+                gunzip.CopyTo(plain);
+                served = plain.ToArray();
+            }
+
+            var media = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(served) };
+            media.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(mediaObject.ContentType);
+            // The hash is always of the stored bytes: for a transcoded object that is the compressed form.
+            media.Headers.TryAddWithoutValidation("x-goog-hash", "crc32c=" + Crc32c.Base64(stored));
+            media.Headers.TryAddWithoutValidation("x-goog-generation", mediaObject.Generation.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (transcoded) media.Headers.TryAddWithoutValidation("x-goog-stored-content-encoding", "gzip");
+
+            // The SDK's CRC32C check is a response-stream interceptor that Google's real HTTP handler chain
+            // applies; this fake replaces that chain, so feed the served bytes to the interceptor here.
+            if (request.Options.TryGetValue(new HttpRequestOptionsKey<Func<HttpResponseMessage, StreamInterceptor>>(ConfigurableMessageHandler.ResponseStreamInterceptorProviderKey), out var interceptorProvider)
+                && interceptorProvider(media) is { } interceptor)
+                interceptor(served, 0, served.Length);
+            return media;
         }
 
         // Object metadata & delete: GET, PUT, PATCH, DELETE /storage/v1/b/{b}/o/{o}
@@ -203,7 +266,15 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
 
             if (request.Method == HttpMethod.Delete)
             {
-                lock (Objects) Objects.Remove(key);
+                lock (Objects)
+                {
+                    if (!Objects.TryGetValue(key, out var doomed))
+                        return Json(HttpStatusCode.NotFound, new { error = new { code = 404, message = $"No such object: {key}" } });
+                    if (System.Web.HttpUtility.ParseQueryString(request.RequestUri!.Query)["ifGenerationMatch"] is { } expectedGeneration
+                        && expectedGeneration != doomed.Generation.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                        return Json(HttpStatusCode.PreconditionFailed, new { error = new { code = 412, message = "At least one of the pre-conditions you specified did not hold." } });
+                    Objects.Remove(key);
+                }
                 return new HttpResponseMessage(HttpStatusCode.NoContent);
             }
 
@@ -243,16 +314,27 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
         return Json(HttpStatusCode.NotFound, new { error = new { code = 404, message = $"FakeFederationBackend has no route for {request.Method} {url}" } });
     }
 
-    private static object ObjectJson(string bucket, string name, FakeObject obj) => new
+    /// <summary>
+    /// The object resource. Like Google, it carries the CRC32C of the stored bytes (the compressed form for
+    /// a gzip-stored object) when the fake holds them; the SDK validates a download against it.
+    /// </summary>
+    private object ObjectJson(string bucket, string name, FakeObject obj)
     {
-        kind = "storage#object",
-        bucket,
-        name,
-        size = obj.Size.ToString(System.Globalization.CultureInfo.InvariantCulture),
-        contentType = obj.ContentType,
-        generation = obj.Generation.ToString(System.Globalization.CultureInfo.InvariantCulture),
-        metageneration = obj.Metageneration.ToString(System.Globalization.CultureInfo.InvariantCulture)
-    };
+        var resource = new Dictionary<string, object>
+        {
+            ["kind"] = "storage#object",
+            ["bucket"] = bucket,
+            ["name"] = name,
+            ["size"] = obj.Size.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["contentType"] = obj.ContentType,
+            ["generation"] = obj.Generation.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["metageneration"] = obj.Metageneration.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        };
+        byte[]? stored;
+        lock (StoredObjects) StoredObjects.TryGetValue(bucket + "/" + name, out stored);
+        if (stored != null) resource["crc32c"] = Crc32c.Base64(stored);
+        return resource;
+    }
 
     /// <summary>
     /// Google's resumable upload: POST starts a session (metadata JSON, Location header back), then

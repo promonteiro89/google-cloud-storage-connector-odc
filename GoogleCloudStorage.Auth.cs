@@ -79,6 +79,8 @@ internal sealed class ExpiringCache<T> where T : class
 
             T value = factory(key); // may throw: nothing has been cached yet
             _entries[key] = new Entry(value, absoluteExpiryUtc, now);
+            // A burst of distinct credentials must not grow the cache past the cap until the next minute sweep.
+            if (_entries.Count > _maxEntries) Sweep(now);
             return value;
         }
     }
@@ -178,6 +180,29 @@ public partial class GoogleCloudStorage
     /// a stalled request fails with the connector's own message instead of the platform's timeout.
     /// </summary>
     internal static readonly TimeSpan StorageRequestTimeout = TimeSpan.FromSeconds(80);
+
+    /// <summary>
+    /// Google's default client factory with the StorageRequestTimeout (80 s) instead of 100 s, for the
+    /// credentials' own calls (STS, impersonation, signBlob, service-account token): above ODC's 95-second
+    /// action limit a stall would surface as the platform's timeout instead of the connector's message.
+    /// </summary>
+    private sealed class TimeoutHttpClientFactory : IHttpClientFactory
+    {
+        // HttpClientFactory.CreateHttpClient is not virtual in Google.Apis 1.78.0: wrap the default factory.
+        private readonly Google.Apis.Http.HttpClientFactory _inner = new();
+
+        public ConfigurableHttpClient CreateHttpClient(CreateHttpClientArgs args)
+        {
+            var client = _inner.CreateHttpClient(args);
+            client.Timeout = StorageRequestTimeout;
+            return client;
+        }
+    }
+
+    private static readonly IHttpClientFactory CredentialHttpClientFactory = new TimeoutHttpClientFactory();
+
+    /// <summary>Largest identity provider response read; a token response is a few KB.</summary>
+    internal const int MaxIdentityProviderResponseBytes = 1_048_576;
 
     /// <summary>
     /// Production identity-provider client: never follows redirects (a 307/308 would re-send the
@@ -288,7 +313,11 @@ public partial class GoogleCloudStorage
     {
         string trimmed = (tokenEndpoint ?? string.Empty).Trim();
         bool absolute = Uri.TryCreate(trimmed, UriKind.Absolute, out var uri);
-        string display = absolute && uri != null ? uri.GetLeftPart(UriPartial.Path) : trimmed;
+        // Only a real http(s) URL is ever echoed: a value without a scheme, or one that parses with
+        // a bogus scheme ("user:pw@host"), may itself be the secret.
+        string? display = absolute && uri != null && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+            ? uri.GetLeftPart(UriPartial.Path)
+            : null;
 
         if (absolute && uri != null && !string.IsNullOrEmpty(uri.UserInfo))
             throw new ArgumentException("TokenEndpoint must not contain user information (a 'user:password@' part). Remove the credentials from the URL and let ClientId/ClientSecret authenticate the request.");
@@ -297,7 +326,11 @@ public partial class GoogleCloudStorage
             && (uri.Scheme == Uri.UriSchemeHttps
                 || (uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback && HttpClientFactoryOverride != null));
         if (!ok)
-            throw new ArgumentException($"TokenEndpoint '{display}' must be an absolute https:// URL (for example 'https://login.microsoftonline.com/TENANT_ID/oauth2/v2.0/token').");
+        {
+            if (display != null)
+                throw new ArgumentException($"TokenEndpoint '{display}' must be an absolute https:// URL (for example 'https://login.microsoftonline.com/TENANT_ID/oauth2/v2.0/token').");
+            throw new ArgumentException("TokenEndpoint must be an absolute https:// URL (for example 'https://login.microsoftonline.com/TENANT_ID/oauth2/v2.0/token'). The configured value is not shown because it is not a valid URL.");
+        }
     }
 
     /// <summary>
@@ -425,9 +458,10 @@ public partial class GoogleCloudStorage
     {
         try
         {
-            var initializer = new ServiceAccountCredential.Initializer(authentication.ClientEmail)
+            var initializer = new ServiceAccountCredential.Initializer(authentication.ClientEmail?.Trim())
             {
-                Scopes = [StorageService.Scope.CloudPlatform]
+                Scopes = [StorageService.Scope.CloudPlatform],
+                HttpClientFactory = HttpClientFactoryOverride ?? CredentialHttpClientFactory
             }.FromPrivateKey(authentication.PrivateKey.Replace("\\n", "\n"));
 
             return new ServiceAccountCredential(initializer);
@@ -553,14 +587,14 @@ public partial class GoogleCloudStorage
         {
             Scopes = [StorageService.Scope.CloudPlatform]
         };
-        if (HttpClientFactoryOverride != null) externalInitializer.HttpClientFactory = HttpClientFactoryOverride;
+        externalInitializer.HttpClientFactory = HttpClientFactoryOverride ?? CredentialHttpClientFactory;
         var federated = GoogleCredential.FromProgrammaticExternalAccountCredential(new ProgrammaticExternalAccountCredential(externalInitializer));
 
         var impersonationInitializer = new ImpersonatedCredential.Initializer(a.ServiceAccountEmail.Trim())
         {
             Scopes = [StorageService.Scope.CloudPlatform]
         };
-        if (HttpClientFactoryOverride != null) impersonationInitializer.HttpClientFactory = HttpClientFactoryOverride;
+        impersonationInitializer.HttpClientFactory = HttpClientFactoryOverride ?? CredentialHttpClientFactory;
 
         return new FederatedIdentity(federated.Impersonate(impersonationInitializer), tokenSource, FederatedExpiry(a));
     }
@@ -591,9 +625,9 @@ public partial class GoogleCloudStorage
 
         /// <summary>The token endpoint for messages: scheme, host and path only, never query or user info.</summary>
         private string EndpointDisplay =>
-            Uri.TryCreate(_tokenEndpoint, UriKind.Absolute, out var uri)
+            Uri.TryCreate(_tokenEndpoint, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
                 ? uri.GetLeftPart(UriPartial.Path)
-                : (_tokenEndpoint ?? string.Empty);
+                : "(the configured TokenEndpoint)";
 
         public SubjectTokenSource(string? suppliedToken, string? tokenEndpoint, string? clientId, string? clientSecret, string? scope, string? audience)
         {
@@ -669,7 +703,7 @@ public partial class GoogleCloudStorage
                 HttpResponseMessage response;
                 try
                 {
-                    response = await http.SendAsync(request, ct).ConfigureAwait(false);
+                    response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
                 }
                 catch (Exception e) when (e is HttpRequestException || e is TaskCanceledException)
                 {
@@ -683,7 +717,26 @@ public partial class GoogleCloudStorage
 
                 using (response)
                 {
-                    string body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                    string body;
+                    // HttpClient.Timeout does not cover the body with ResponseHeadersRead: bound it here.
+                    using (var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                    {
+                        readCts.CancelAfter(TimeSpan.FromSeconds(30));
+                        try
+                        {
+                            body = await ReadBoundedAsync(response.Content, MaxIdentityProviderResponseBytes, readCts.Token).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException e)
+                        {
+                            if (ct.IsCancellationRequested)
+                                throw;
+                            throw new IdentityProviderException($"The identity provider token endpoint '{EndpointDisplay}' did not respond within 30 seconds.", e);
+                        }
+                        catch (Exception e) when (e is HttpRequestException || e is IOException)
+                        {
+                            throw new IdentityProviderException($"Could not reach the identity provider token endpoint '{EndpointDisplay}': {e.Message}", e);
+                        }
+                    }
 
                     int statusCode = (int)response.StatusCode;
                     if (statusCode >= 300 && statusCode < 400)
@@ -711,9 +764,12 @@ public partial class GoogleCloudStorage
                     // Detail is the OAuth error fields when the body is JSON; otherwise only
                     // metadata. The raw body is never echoed (it may contain secrets or HTML).
                     string detail;
+                    string? rawError = null; // the invalid_client check compares the provider's exact value
                     if (ParseOAuthError(body, out var error, out var description))
                     {
-                        if (description != null && description.Length > 300) description = description[..300] + "...";
+                        rawError = error;
+                        if (error != null) error = SanitizeProviderText(error, _clientSecret);
+                        if (description != null) description = SanitizeProviderText(description, _clientSecret);
                         detail = error == null && description == null
                             ? "(the response body contained no 'error' or 'error_description')"
                             : error == null ? description! : description == null ? error : $"{error}: {description}";
@@ -726,7 +782,7 @@ public partial class GoogleCloudStorage
                         detail = $"(non-JSON response, {Encoding.UTF8.GetByteCount(body)} bytes, Content-Type {contentType})";
                     }
 
-                    bool invalidClient = response.StatusCode == HttpStatusCode.Unauthorized || error == "invalid_client";
+                    bool invalidClient = response.StatusCode == HttpStatusCode.Unauthorized || rawError == "invalid_client";
                     if (!basic && invalidClient && attempt == 0)
                         continue;
 
@@ -735,6 +791,38 @@ public partial class GoogleCloudStorage
                     throw new IdentityProviderException($"The identity provider rejected the client-credentials token request ({(int)response.StatusCode} {statusText}): {detail}. Check TokenEndpoint, ClientId, ClientSecret, and Scope/Audience.");
                 }
             }
+        }
+
+        /// <summary>Reads the body as UTF-8, failing as soon as it exceeds maxBytes (never reads more than maxBytes + 1).</summary>
+        private async Task<string> ReadBoundedAsync(HttpContent content, int maxBytes, CancellationToken ct)
+        {
+            await using var stream = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            var buffer = new byte[maxBytes + 1];
+            int total = 0;
+            while (total < buffer.Length)
+            {
+                int read = await stream.ReadAsync(buffer.AsMemory(total, buffer.Length - total), ct).ConfigureAwait(false);
+                if (read == 0) break;
+                total += read;
+            }
+            if (total > maxBytes)
+                throw new IdentityProviderException($"The identity provider token endpoint '{EndpointDisplay}' returned a response larger than 1 MB. Check TokenEndpoint.");
+            return Encoding.UTF8.GetString(buffer, 0, total);
+        }
+
+        /// <summary>
+        /// Makes text from the identity provider safe to put in a message: the client secret (some
+        /// providers echo the request) is masked, control characters become spaces, and it is cut at 300 characters.
+        /// </summary>
+        private static string SanitizeProviderText(string text, string? secret)
+        {
+            if (!string.IsNullOrEmpty(secret))
+                text = text.Replace(secret, "***", StringComparison.Ordinal);
+            var chars = text.ToCharArray();
+            for (int i = 0; i < chars.Length; i++)
+                if (char.IsControl(chars[i])) chars[i] = ' ';
+            text = new string(chars);
+            return text.Length > 300 ? text[..300] + "..." : text;
         }
 
         private static (string token, int expiresIn) ParseTokenResponse(string body)

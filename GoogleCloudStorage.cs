@@ -24,10 +24,35 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     /// </summary>
     internal static TimeSpan DeleteByPrefixBudget { get; set; } = TimeSpan.FromSeconds(75);
 
+    /// <summary>
+    /// The hard limit on one Object_DeleteByPrefix call. It cancels the request in flight, so a call
+    /// started just inside <see cref="DeleteByPrefixBudget"/> cannot run past ODC's 95-second kill. Test seam.
+    /// </summary>
+    internal static TimeSpan DeleteByPrefixDeadline { get; set; } = TimeSpan.FromSeconds(88);
+
+    /// <summary>
+    /// How many objects one listing page returns in Object_DeleteByPrefix; each page is deleted before
+    /// the next is fetched, so the call never holds the whole listing in memory. Test seam.
+    /// </summary>
+    internal static int DeleteByPrefixPageSize { get; set; } = 1000;
+
+    /// <summary>
+    /// The waits between the attempts of a retried upload or download (so at most one more attempt than
+    /// delays). Test seam.
+    /// </summary>
+    internal static TimeSpan[] TransferRetryDelays { get; set; } = { TimeSpan.FromMilliseconds(500), TimeSpan.FromSeconds(1) };
+
+    /// <summary>No transfer retry starts after this much time, so retries never push a call past ODC's 95 seconds.</summary>
+    private static readonly TimeSpan TransferRetryWindow = TimeSpan.FromSeconds(40);
+
     public void Object_Upload(Authentication authentication, string bucketName, string objectName, File file, IEnumerable<MetadataEntry> metadata)
     {
         Require(bucketName, "BucketName");
         Require(objectName, "ObjectName");
+
+        // A line break would inject extra headers into the upload request.
+        if (file.ContentType != null && (file.ContentType.Contains('\r') || file.ContentType.Contains('\n')))
+            throw new ArgumentException("ContentType cannot contain line breaks.");
 
         var storageClient = GetStorageClient(authentication);
         try
@@ -40,8 +65,13 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
                 Metadata = ToMetadataDictionary(metadata)
             };
 
-            using var stream = new MemoryStream(file.Content ?? Array.Empty<byte>());
-            storageClient.UploadObject(gcsObject, stream);
+            // Opening the resumable session is not retried by the SDK; each attempt re-reads the same bytes.
+            var content = file.Content ?? Array.Empty<byte>();
+            WithTransferRetry(() =>
+            {
+                using var stream = new MemoryStream(content);
+                return storageClient.UploadObject(gcsObject, stream);
+            });
         }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, null); }
     }
@@ -54,15 +84,19 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         var storageClient = GetStorageClient(authentication);
         try
         {
-            using var stream = new CappedDownloadStream();
-            var obj = storageClient.DownloadObject(bucketName, objectName, stream,
-                new DownloadObjectOptions { DownloadValidationMode = DownloadValidationMode.Automatic });
-
-            file = new File
+            // DownloadObject has no retry options of its own; every attempt starts with a fresh buffer.
+            file = WithTransferRetry(() =>
             {
-                Content = stream.ToArray(),
-                ContentType = obj.ContentType ?? ""
-            };
+                using var stream = new CappedDownloadStream();
+                var obj = storageClient.DownloadObject(bucketName, objectName, stream,
+                    new DownloadObjectOptions { DownloadValidationMode = DownloadValidationMode.Automatic });
+
+                return new File
+                {
+                    Content = stream.ToArray(),
+                    ContentType = obj.ContentType ?? ""
+                };
+            });
         }
         catch (Exception e) when (FindInChain<DownloadTooLargeException>(e) != null)
         {
@@ -144,8 +178,10 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
             storageClient.GetObject(bucketName, objectName);
             exists = true;
         }
-        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound && !IsBucketNotFound(e))
+        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
         {
+            if (!IsObjectNotFound(storageClient, e, bucketName))
+                throw TranslateException(e, authentication, bucketName, null);
             exists = false;
         }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, objectName); }
@@ -192,8 +228,10 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
                     custom.Add(new MetadataEntry { Key = kv.Key, Value = kv.Value ?? string.Empty });
             }
         }
-        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound && !IsBucketNotFound(e))
+        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
         {
+            if (!IsObjectNotFound(storageClient, e, bucketName))
+                throw TranslateException(e, authentication, bucketName, null);
             exists = false;
         }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, objectName); }
@@ -207,9 +245,23 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         Require(objectName, "ObjectName");
 
         var storageClient = GetStorageClient(authentication);
+
+        // Read the generation first and delete only that generation: a delete that carries a
+        // precondition is retried by the SDK on transient errors, and a replaced object is never removed.
+        long? generation;
         try
         {
-            storageClient.DeleteObject(bucketName, objectName);
+            generation = storageClient.GetObject(bucketName, objectName).Generation;
+        }
+        catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, objectName); }
+
+        try
+        {
+            storageClient.DeleteObject(bucketName, objectName, new DeleteObjectOptions { IfGenerationMatch = generation });
+        }
+        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.PreconditionFailed)
+        {
+            throw new Exception($"Object '{objectName}' in bucket '{bucketName}' was replaced while it was being deleted; nothing was deleted. Retry the delete if the new version should be removed too.", e);
         }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, objectName); }
     }
@@ -269,7 +321,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         }
         catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
         {
-            throw CopyNotFoundException(storageClient, e, authentication, sourceBucketName, sourceObjectName, destinationBucketName);
+            throw CopyNotFoundException(storageClient, e, authentication, sourceBucketName, sourceObjectName, destinationBucketName, generation);
         }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, sourceBucketName, sourceObjectName); }
 
@@ -361,39 +413,63 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
         var storageClient = GetStorageClient(authentication);
 
-        // Materialize the (Name, Generation) pairs first so deletions can't interfere with listing pagination,
-        // and each delete carries a generation precondition (which makes the SDK retry transient failures).
-        var targets = new List<(string Name, long? Generation)>();
+        // The deadline cancels a request still in flight, so the call ends before ODC's 95-second kill.
+        using var deadline = new CancellationTokenSource(DeleteByPrefixDeadline);
+        long deleted = 0;
+
+        Exception BudgetExceeded() => new Exception($"Deleted {deleted} objects under prefix '{prefix}' before the {DeleteByPrefixBudget.TotalSeconds:0}-second time budget of one call ran out (ODC limits an action to 95 seconds). Nothing was rolled back; call Object_DeleteByPrefix again with the same prefix to delete the rest.");
+
+        // Delete page by page: each delete carries the generation it was listed with (which makes the SDK
+        // retry transient failures), and GCS page tokens are positional, so deleting listed objects does
+        // not disturb the paging.
+        var pages = storageClient.ListObjectsAsync(bucketName, prefix, new ListObjectsOptions { PageSize = DeleteByPrefixPageSize })
+            .AsRawResponses().GetAsyncEnumerator(deadline.Token);
         try
         {
-            foreach (var obj in storageClient.ListObjects(bucketName, prefix))
-                targets.Add((obj.Name, obj.Generation));
+            while (true)
+            {
+                if (stopwatch.Elapsed >= DeleteByPrefixBudget) throw BudgetExceeded();
+
+                try
+                {
+                    if (!pages.MoveNextAsync().AsTask().GetAwaiter().GetResult()) break;
+                }
+                catch (OperationCanceledException) when (deadline.IsCancellationRequested) { throw BudgetExceeded(); }
+                catch (Exception e) when (IsTranslatable(e))
+                {
+                    if (deleted == 0) throw TranslateException(e, authentication, bucketName, null);
+                    throw new Exception($"Deleted {deleted} objects under prefix '{prefix}', then listing the remaining objects failed: {TranslateException(e, authentication, bucketName, null).Message}", e);
+                }
+
+                foreach (var obj in pages.Current.Items ?? new List<Google.Apis.Storage.v1.Data.Object>())
+                {
+                    // One call may not finish the work: stop before ODC kills the action and report where it
+                    // stopped, so the caller can resume with the same prefix.
+                    if (stopwatch.Elapsed >= DeleteByPrefixBudget) throw BudgetExceeded();
+
+                    try
+                    {
+                        storageClient.DeleteObjectAsync(bucketName, obj.Name,
+                            new DeleteObjectOptions { IfGenerationMatch = obj.Generation }, deadline.Token).GetAwaiter().GetResult();
+                        deleted++;
+                    }
+                    catch (OperationCanceledException) when (deadline.IsCancellationRequested) { throw BudgetExceeded(); }
+                    catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound || e.HttpStatusCode == HttpStatusCode.PreconditionFailed)
+                    {
+                        // Already gone (404) or replaced since listing (412) - skip without counting and keep going.
+                    }
+                    catch (Exception e) when (IsTranslatable(e))
+                    {
+                        // TranslateException gives the same message a whole-object call would give, so the
+                        // partial-progress error carries an actionable cause instead of Google's raw text.
+                        throw new Exception($"Deleted {deleted} objects under prefix '{prefix}', then failed on '{obj.Name}': {TranslateException(e, authentication, bucketName, obj.Name).Message}", e);
+                    }
+                }
+            }
         }
-        catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, null); }
-
-        long deleted = 0;
-        foreach (var (name, generation) in targets)
+        finally
         {
-            // One call may not finish the work: stop before ODC kills the action and report where it
-            // stopped, so the caller can resume with the same prefix.
-            if (stopwatch.Elapsed >= DeleteByPrefixBudget)
-                throw new Exception($"Deleted {deleted} of {targets.Count} objects under prefix '{prefix}' before the {DeleteByPrefixBudget.TotalSeconds:0}-second time budget of one call ran out (ODC limits an action to 95 seconds). Nothing was rolled back; call Object_DeleteByPrefix again with the same prefix to delete the rest.");
-
-            try
-            {
-                storageClient.DeleteObject(bucketName, name, new DeleteObjectOptions { IfGenerationMatch = generation });
-                deleted++;
-            }
-            catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound || e.HttpStatusCode == HttpStatusCode.PreconditionFailed)
-            {
-                // Already gone (404) or replaced since listing (412) - skip without counting and keep going.
-            }
-            catch (Exception e) when (IsTranslatable(e))
-            {
-                // TranslateException gives the same message a whole-object call would give, so the
-                // partial-progress error carries an actionable cause instead of Google's raw text.
-                throw new Exception($"Deleted {deleted} of {targets.Count} objects under prefix '{prefix}', then failed on '{name}': {TranslateException(e, authentication, bucketName, name).Message}", e);
-            }
+            pages.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
 
         deletedCount = deleted;
@@ -413,8 +489,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         if (contentType != null && (contentType.Contains('\r') || contentType.Contains('\n')))
             throw new ArgumentException("ContentType cannot contain line breaks.");
 
-        var urlSigner = GetUrlSigner(authentication);
-
+        // Validate the Operation before building the signer, so a typo fails without any network call.
         var method = (operation ?? "").Trim().ToUpperInvariant() switch
         {
             "DOWNLOAD" => HttpMethod.Get,
@@ -422,6 +497,8 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
             "DELETE" => HttpMethod.Delete,
             _ => throw new ArgumentException($"Invalid Operation '{operation}'. Use 'Download', 'Upload', or 'Delete'.")
         };
+
+        var urlSigner = GetUrlSigner(authentication);
 
         var template = UrlSigner.RequestTemplate
             .FromBucket(bucketName)
@@ -449,10 +526,12 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Bucket_List(Authentication authentication, out IEnumerable<Bucket> buckets)
     {
+        Require(authentication.ProjectId, "ProjectId");
+
         var storageClient = GetStorageClient(authentication);
         try
         {
-            var gcsBuckets = storageClient.ListBuckets(authentication.ProjectId);
+            var gcsBuckets = storageClient.ListBuckets(authentication.ProjectId.Trim());
 
             buckets = gcsBuckets.Select(b => new Bucket
             {
@@ -467,19 +546,26 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
     public void Bucket_Create(Authentication authentication, string bucketName, string location)
     {
+        Require(authentication.ProjectId, "ProjectId");
         Require(bucketName, "BucketName");
 
         var storageClient = GetStorageClient(authentication);
         try
         {
             storageClient.CreateBucket(
-                authentication.ProjectId,
+                authentication.ProjectId.Trim(),
                 new Google.Apis.Storage.v1.Data.Bucket
                 {
                     Name = bucketName,
                     Location = string.IsNullOrWhiteSpace(location) ? null : location.Trim()
                 }
             );
+        }
+        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.NotFound)
+        {
+            // Creating a bucket never 404s on the bucket itself: the project is what was not found.
+            string details = e.Error != null && !string.IsNullOrEmpty(e.Error.Message) ? e.Error.Message : e.Message;
+            throw new Exception($"Bucket '{bucketName}' was not created: project '{authentication.ProjectId.Trim()}' was not found, or the service account cannot access it. Check ProjectId. Details: {details}", e);
         }
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, null); }
     }
@@ -526,16 +612,72 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     }
 
     /// <summary>
+    /// Runs one upload or download attempt, retrying transient failures (408, 429, 500, 502, 503, 504,
+    /// network and I/O errors) after each of <see cref="TransferRetryDelays"/>. Never retries a too-large
+    /// download, a cancellation or timeout (a retry would pass ODC's 95-second limit), or any other 4xx,
+    /// and stops retrying once <see cref="TransferRetryWindow"/> has passed.
+    /// </summary>
+    private static T WithTransferRetry<T>(Func<T> attempt)
+    {
+        var delays = TransferRetryDelays;
+        var stopwatch = Stopwatch.StartNew();
+        for (int tried = 0; ; tried++)
+        {
+            try
+            {
+                return attempt();
+            }
+            catch (Exception e) when (tried < delays.Length && stopwatch.Elapsed < TransferRetryWindow && IsRetryableTransferFailure(e))
+            {
+                Thread.Sleep(delays[tried]);
+            }
+        }
+    }
+
+    private static bool IsRetryableTransferFailure(Exception e)
+    {
+        if (FindInChain<DownloadTooLargeException>(e) != null) return false;
+        if (e is OperationCanceledException) return false; // includes TaskCanceledException
+        if (e is Google.GoogleApiException api)
+            return api.HttpStatusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests
+                or HttpStatusCode.InternalServerError or HttpStatusCode.BadGateway
+                or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout;
+        return e is HttpRequestException || e is IOException;
+    }
+
+    /// <summary>
+    /// Decides whether a 404 from an object GET means the object is missing (true) or the bucket is
+    /// (false), without relying on Google's English wording alone: "No such object" is an object, any
+    /// other message naming the bucket is a bucket, and an ambiguous one (plain "Not Found") is settled
+    /// by looking the bucket up. If that lookup fails in any other way, the answer is "not the object".
+    /// </summary>
+    private static bool IsObjectNotFound(StorageClient client, Google.GoogleApiException e, string bucketName)
+    {
+        string msg = (e.Error?.Message) ?? e.Message ?? "";
+        if (msg.IndexOf("No such object", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        if (msg.IndexOf("bucket", StringComparison.OrdinalIgnoreCase) >= 0) return false;
+        try
+        {
+            client.GetBucket(bucketName);
+            return true;
+        }
+        catch (Exception) { return false; }
+    }
+
+    /// <summary>
     /// A 404 from a copy (an object rewrite) means either the source object or the destination bucket
     /// is missing, and the message wording differs between Google and emulators. Probes the source:
-    /// if the source exists, the destination bucket is missing; if the probe returns 404, the source
+    /// if its generation is not the one the move read, the source changed; if the source exists, the destination bucket is missing; if the probe returns 404, the source
     /// is missing; if the probe fails any other way, reports both candidates and the probe error.
     /// </summary>
-    private static Exception CopyNotFoundException(StorageClient storageClient, Google.GoogleApiException e, Authentication authentication, string sourceBucketName, string sourceObjectName, string destinationBucketName)
+    private static Exception CopyNotFoundException(StorageClient storageClient, Google.GoogleApiException e, Authentication authentication, string sourceBucketName, string sourceObjectName, string destinationBucketName, long? expectedSourceGeneration = null)
     {
         try
         {
-            storageClient.GetObject(sourceBucketName, sourceObjectName);
+            var probed = storageClient.GetObject(sourceBucketName, sourceObjectName);
+            // A source that was replaced meanwhile is a change, not a missing bucket (Move only).
+            if (expectedSourceGeneration.HasValue && probed.Generation != expectedSourceGeneration)
+                return new Exception($"The source object '{sourceBucketName}/{sourceObjectName}' changed while it was being moved; nothing was moved. Retry the move.", e);
             return FriendlyException(e, authentication, destinationBucketName, null);
         }
         catch (Google.GoogleApiException probe) when (probe.HttpStatusCode == HttpStatusCode.NotFound)

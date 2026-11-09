@@ -42,7 +42,8 @@ The connector is architected as an **adapter**. It bridges the OutSystems Develo
 - **Keyless authentication:** Workload Identity Federation (Google's recommended method for workloads outside Google Cloud) works with any OIDC identity provider, server-to-server. Service account keys remain supported as a legacy fallback. See [Authentication](#authentication).
 - **Cached, thread-safe clients:** `StorageClient` and `UrlSigner` instances are cached per credential (keyed by a SHA-256 hash of every credential field, never the raw secret; the two methods never share an entry, and each supplied `SubjectToken` gets its own entry) and reused across requests. This avoids re-parsing the RSA private key and allocating a new `HttpClient` on every call — both types are thread-safe, so sharing them is safe under high concurrency and prevents socket exhaustion. The caches are bounded (500 entries each, least recently used first) and an entry expires after 60 minutes without use, or when the supplied token it was built from expires.
 - **Actionable errors:** every action translates failures into clear, actionable messages: missing bucket vs. object, access denied, unauthenticated, bucket-not-empty, credential mismatch, identity provider errors, network failures and timeouts. The original exception is preserved as the inner exception for diagnostics. Messages never contain secrets, token endpoint credentials or query strings, or raw identity provider responses.
-- **Within ODC's platform limits:** every request to Google times out after 80 seconds (below ODC's 95-second action limit), `Object_Download` refuses objects over ODC's 5.5 MB payload limit, and `Object_DeleteByPrefix` stops after 75 seconds and reports its progress, so the connector's own message reaches the app instead of a platform timeout.
+- **Within ODC's platform limits:** every request to Google, including the token exchange, impersonation and URL-signing calls, times out after 80 seconds (below ODC's 95-second action limit), `Object_Download` refuses objects over ODC's 5.5 MB payload limit, and `Object_DeleteByPrefix` stops after 75 seconds and reports its progress, so the connector's own message reaches the app instead of a platform timeout.
+- **Safe retries:** transient Google errors (408, 429, 5xx) and network errors are retried where a retry cannot change the outcome: uploads and downloads (up to 3 attempts), deletes, copies and metadata updates (each guarded by the object's generation).
 - **End-to-end upload integrity:** `Object_Upload` sends the CRC32C checksum of the exact bytes with the upload (Google.Cloud.Storage.V1 5.x). If anything changes the data in transit, Google rejects the upload before storing it, so a corrupted object is never created and an existing object is never overwritten with bad data.
 - **V4 Signed URLs:** Offloads large file data transfers directly to the client browser, bypassing the ODC server to optimize memory and bandwidth.
 - **Resource Embedding:** Branded icons are embedded directly into the assembly to provide a premium integrated experience in Service Studio.
@@ -99,7 +100,7 @@ Any OIDC identity provider that issues **signed JWTs (RS256/ES256)** works: Micr
 | Field | Description |
 |---|---|
 | `AuthenticationMethod` | `WorkloadIdentityFederation` |
-| `ProjectId` | Your Google Cloud project ID (used by `Bucket_List` / `Bucket_Create`) |
+| `ProjectId` | Your Google Cloud project ID (required by `Bucket_List` / `Bucket_Create`; surrounding spaces are ignored) |
 | `WorkloadIdentityProvider` | `//iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER` |
 | `ServiceAccountEmail` | The service account the connector acts as |
 | `TokenEndpoint` | Your identity provider's OAuth 2.0 token endpoint (**https**). Use the final URL: redirects are not followed, and a URL with user information (`user:password@`) is rejected. Private and on-premises hosts (Keycloak, ADFS) are fine. |
@@ -163,7 +164,7 @@ Then set `WorkloadIdentityProvider` to `//iam.googleapis.com/projects/$PROJECT_N
 ### Object Operations
 
 #### `Object_Upload`
-Persists a file to a specific GCS bucket, optionally with custom metadata.
+Persists a file to a specific GCS bucket, optionally with custom metadata. A `ContentType` containing a line break is rejected before anything is sent. Transient errors (408, 429, 5xx, network) are retried, up to 3 attempts in total.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -177,7 +178,7 @@ Persists a file to a specific GCS bucket, optionally with custom metadata.
 > **Integrity check:** the upload carries a CRC32C checksum of `file.Content`. If the data Google receives doesn't match, the upload fails with an "Upload rejected by Google Cloud Storage … retry the upload" error, nothing is stored, and any existing object with that name is left unchanged.
 
 #### `Object_Download`
-Retrieves a file and its metadata from GCS. Objects stored with `Content-Encoding: gzip` are returned **decompressed**, so `Content` can be larger than the stored `Size`. Objects larger than **5.5 MB** (ODC's payload limit for an action) are refused with an error pointing to `Object_GetSignedUrl`; download those directly from Google with a signed URL.
+Retrieves a file and its metadata from GCS. Objects stored with `Content-Encoding: gzip` are returned **decompressed**, so `Content` can be larger than the stored `Size`. Objects larger than **5.5 MB** (ODC's payload limit for an action) are refused with an error pointing to `Object_GetSignedUrl`; download those directly from Google with a signed URL. Transient errors (408, 429, 5xx, network) are retried, up to 3 attempts in total.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -248,7 +249,7 @@ Retrieves an object's full metadata (size, content type, hashes, generation, sto
 | `customMetadata` | `List of MetadataEntry` | The object's custom key-value metadata. Empty when the object has none or does not exist. |
 
 #### `Object_Delete`
-Deletes an object from a bucket. On a bucket with **Object Versioning** or **soft delete** enabled, Google keeps a noncurrent or soft-deleted copy that can be restored (and is billed) until it expires; on other buckets the object is gone. The delete is not retried automatically: a failed call can be retried safely by the caller.
+Deletes an object from a bucket. On a bucket with **Object Versioning** or **soft delete** enabled, Google keeps a noncurrent or soft-deleted copy that can be restored (and is billed) until it expires; on other buckets the object is gone. The connector reads the object's generation first and deletes only that generation, so transient errors are retried automatically and an object replaced in the meantime is never deleted (the action then reports it). This needs `storage.objects.get` as well as `storage.objects.delete`; Storage Object Admin has both.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -299,7 +300,7 @@ Changes an object's content headers and custom metadata **without re-uploading i
 | `metadata` | `List of MetadataEntry` | Custom metadata changes. Empty list = unchanged. An entry with an empty `Value` removes that key; others are set/overwritten. |
 
 #### `Object_DeleteByPrefix`
-Deletes every object under a prefix (a "folder" and everything below it) server-side, and returns how many were deleted. The prefix is **mandatory and cannot be empty**, as a safety guard against wiping an entire bucket. Each object is deleted only if it is still the generation that was listed, so transient errors are retried automatically. An object deleted (404) or replaced (412) by someone else after the listing is skipped and not counted, so new data written under the prefix during the call is never deleted. A mid-operation failure reports exactly how many objects were already deleted, with the translated cause. Versioning and soft delete apply as for `Object_Delete`.
+Deletes every object under a prefix (a "folder" and everything below it) server-side, and returns how many were deleted. The prefix is **mandatory and cannot be empty**, as a safety guard against wiping an entire bucket. Objects are listed and deleted one page (1,000 objects) at a time and one object at a time, so the call never holds the whole listing in memory. Each object is deleted only if it is still the generation that was listed, so transient errors are retried automatically. An object deleted (404) or replaced (412) after the listing is skipped and not counted, so new data written under the prefix during the call is never deleted. (When a retried delete had in fact succeeded the first time, its retry gets a 404, so the count can be slightly lower than the number of objects removed.) One call works for at most **75 seconds** and is cut off at 88 seconds even if a request is still running; it then stops with an error saying how many objects it deleted, and calling it again with the same prefix continues. A mid-operation failure also reports how many objects were already deleted, with the translated cause. Versioning and soft delete apply as for `Object_Delete`.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -376,7 +377,7 @@ Decommissioning of an empty storage container.
 | `bucketName` | `Text` | Name of the bucket to delete |
 
 #### `Bucket_Exists`
-Checks whether a bucket exists and is accessible to the service account, without listing its contents.
+Checks whether a bucket exists and is accessible to the service account, without listing its contents. It needs `storage.buckets.get`, which **Storage Object Admin does not include**: grant Storage Admin (or a custom role with that permission), otherwise the action fails with an access-denied error instead of returning a value.
 
 **Arguments:**
 | Argument | Type | Description |

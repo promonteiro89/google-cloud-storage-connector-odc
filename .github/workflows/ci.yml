@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Least privilege for every job; the live job adds id-token: write for itself.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -19,15 +23,15 @@ jobs:
       # fake-gcs-server binary is reused across runs.
       FAKE_GCS_DIR: ${{ github.workspace }}/.fake-gcs
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup .NET 10
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: '10.0.x'
 
       - name: Cache fake-gcs-server
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ env.FAKE_GCS_DIR }}
           key: fake-gcs-server-1.54.0-linux-amd64
@@ -36,7 +40,14 @@ jobs:
         run: dotnet build GoogleCloudStorage.csproj -c Release
 
       - name: Run test suite (offline + emulator integration + federation contract)
-        run: dotnet test tests/GoogleCloudStorage.Tests/GoogleCloudStorage.Tests.csproj -c Debug --filter "Category!=Live" --logger "console;verbosity=normal"
+        run: dotnet test tests/GoogleCloudStorage.Tests/GoogleCloudStorage.Tests.csproj -c Debug --filter "Category!=Live" --logger "console;verbosity=normal" --logger "trx;LogFileName=results.trx" --results-directory TestResults
+
+      - name: Fail if any test was skipped
+        # Locally the emulator tests skip when fake-gcs-server is unavailable; in CI that would hide
+        # ~55 integration tests behind a green run. Live tests are filtered out above, so any skip here is a failure.
+        run: |
+          skipped=$(grep -o 'outcome="NotExecuted"' TestResults/results.trx | wc -l)
+          if [ "$skipped" -ne 0 ]; then echo "::error::$skipped test(s) were skipped (is fake-gcs-server running?)"; exit 1; fi
 
   live-federation:
     # Keyless, against REAL Google Cloud: this workflow's GitHub OIDC token is exchanged through
@@ -53,10 +64,10 @@ jobs:
       GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup .NET 10
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: '10.0.x'
 
