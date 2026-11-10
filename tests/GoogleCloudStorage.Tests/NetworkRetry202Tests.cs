@@ -286,6 +286,36 @@ public sealed class NetworkRetry202Tests : IDisposable
         Assert.Equal(2, Count(IsSignBlob));
     }
 
+    [Theory]
+    [InlineData(408)]
+    [InlineData(429)]
+    public void N11b_signed_url_repeats_a_signBlob_that_google_refused_for_now(int status)
+    {
+        // Google's credential code repeats signBlob after 500/502/503/504 only; 408 and 429 are the connector's.
+        int seen = 0;
+        _factory.Hook = req => IsSignBlob(req) && ++seen == 1
+            ? Json((HttpStatusCode)status, JsonSerializer.Serialize(new { error = new { code = status, message = "Try again." } }))
+            : null;
+
+        _sut.Object_GetSignedUrl(Federated(), Bucket, "a.txt", 5, out var url);
+
+        Assert.StartsWith("https://storage.googleapis.com/", url);
+        Assert.Equal(2, Count(IsSignBlob));
+    }
+
+    [Fact]
+    public void N11c_signed_url_does_not_repeat_a_signBlob_that_google_denied()
+    {
+        _factory.Hook = req => IsSignBlob(req)
+            ? Json(HttpStatusCode.Forbidden, JsonSerializer.Serialize(new { error = new { code = 403, message = "Permission 'iam.serviceAccounts.signBlob' denied." } }))
+            : null;
+
+        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_GetSignedUrl(Federated(), Bucket, "a.txt", 5, out _));
+
+        Assert.Contains("Service Account Token Creator", ex.Message);
+        Assert.Equal(1, Count(IsSignBlob));
+    }
+
     // ---- N12-N15: listings repeat one page --------------------------------------------
 
     [Fact]

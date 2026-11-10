@@ -809,7 +809,12 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
 
         try
         {
-            url = WithNetworkRetry(() => urlSigner.SignAsync(template, UrlSigner.Options.FromDuration(TimeSpan.FromMinutes(expirationMinutes)), deadline.Token).GetAwaiter().GetResult());
+            // With federation, signing is a request to IAM signBlob. Google's credential code repeats it
+            // after a 500, 502, 503 or 504, but not after a network failure, a 408 or a 429: those three
+            // are repeated here, and only those, so attempts are never multiplied with the library's.
+            url = WithNetworkRetry(
+                () => urlSigner.SignAsync(template, UrlSigner.Options.FromDuration(TimeSpan.FromMinutes(expirationMinutes)), deadline.Token).GetAwaiter().GetResult(),
+                alsoRepeat: e => e is Google.GoogleApiException { HttpStatusCode: HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests });
         }
         catch (OperationCanceledException e) when (deadline.IsCancellationRequested)
         {
@@ -1023,11 +1028,12 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     }
 
     /// <summary>
-    /// A proxy or an identity provider may echo the request it rejected, Authorization header included.
-    /// Anything shaped like a bearer token, a Basic credential or a Google access token is masked.
+    /// A proxy or an identity provider may echo the request it rejected, Authorization header included,
+    /// and Google's token exchange may repeat the token it refused. Anything shaped like a bearer token,
+    /// a Basic credential, a Google access token or a JWT (which always starts with "eyJ") is masked.
     /// </summary>
     private static readonly Regex CredentialShapes = new(
-        @"\b(?<scheme>Bearer)\s+[A-Za-z0-9._~+/=_-]{20,}|\b(?<scheme>Basic)\s+(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{16,}={0,2}|\bya29\.[A-Za-z0-9._-]{10,}",
+        @"\b(?<scheme>Bearer)\s+[A-Za-z0-9._~+/=_-]{20,}|\b(?<scheme>Basic)\s+(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{16,}={0,2}|\bya29\.[A-Za-z0-9._-]{10,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*",
         RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     private static string MaskCredentials(string text) =>
@@ -1154,8 +1160,10 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     /// never once <see cref="TransferRetryWindow"/> has passed. Google's SDK repeats these requests by itself
     /// when Google answers 408, 429 or 5xx, but not when the connection fails. When <paramref name="state"/>
     /// is given, it records that an attempt whose outcome is unknown came before the one that answered.
+    /// <paramref name="alsoRepeat"/> names further failures to repeat, for the one caller whose library
+    /// does not repeat them itself.
     /// </summary>
-    private static T WithNetworkRetry<T>(Func<T> request, SendState? state = null)
+    private static T WithNetworkRetry<T>(Func<T> request, SendState? state = null, Func<Exception, bool>? alsoRepeat = null)
     {
         var delays = TransferRetryDelays;
         var stopwatch = Stopwatch.StartNew();
@@ -1166,7 +1174,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
                 return UnwrapSingleAggregate(request);
             }
             catch (Exception e) when (tried < delays.Length && stopwatch.Elapsed < TransferRetryWindow
-                && (e is HttpRequestException || IsNetworkIo(e)))
+                && (e is HttpRequestException || IsNetworkIo(e) || alsoRepeat?.Invoke(e) == true))
             {
                 if (state != null) state.MayHaveApplied = true;
                 Thread.Sleep(delays[tried]);

@@ -233,6 +233,37 @@ public sealed class Auth202Tests : IDisposable
     }
 
     [Fact]
+    public void A5c_a_secret_echoed_in_the_content_type_of_a_non_json_answer_is_masked()
+    {
+        var a = ClientCredentials(); a.ClientSecret = "fake-secret-XYZ";
+        _backend.IdpResponseOverride = request =>
+        {
+            if (!request.RequestUri!.ToString().StartsWith(FakeFederationBackend.IdpTokenEndpoint)) return null;
+            var response = new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("not json") };
+            response.Content.Headers.Remove("Content-Type");
+            response.Content.Headers.TryAddWithoutValidation("Content-Type", "text/plain; echo=fake-secret-XYZ");
+            return response;
+        };
+
+        var ex = Fail(a);
+
+        Assert.Contains("non-JSON response", ex.Message);
+        Assert.DoesNotContain("fake-secret-XYZ", ex.ToString());
+    }
+
+    [Fact]
+    public void A9d_a_subject_token_repeated_in_googles_refusal_is_masked()
+    {
+        string token = ValidJwt();
+        _backend.StsError = "{\"error\":\"invalid_grant\",\"error_description\":\"The token " + token + " was refused.\"}";
+
+        var ex = Assert.ThrowsAny<Exception>(() => Call(Supplied(token)));
+
+        Assert.Contains("Workload Identity Federation failed", ex.Message);
+        Assert.DoesNotContain(token, ex.Message);
+    }
+
+    [Fact]
     public void A12b_a_numeric_service_account_unique_id_is_accepted()
     {
         var a = ClientCredentials(); a.ServiceAccountEmail = "112233445566778899001";

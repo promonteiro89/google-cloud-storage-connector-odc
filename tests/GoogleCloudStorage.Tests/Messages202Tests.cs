@@ -427,6 +427,8 @@ public sealed class Messages202Tests : IDisposable
     [InlineData("x Basic dXNlcjpwYXNzd29yZDEyMw== y", "x Basic *** y")]
     [InlineData("Authorization: Bearer abcdefghijklmnopqrstuvwxyz-0123456789 end", "Authorization: Bearer *** end")]
     [InlineData("token ya29.a0AfH6SMBx-abc_DEF.123 end", "token *** end")]
+    [InlineData("token eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ3b3JrbG9hZCJ9.c2lnbmF0dXJl was refused", "token *** was refused")]
+    [InlineData("eyJ is how a JWT starts", "eyJ is how a JWT starts")]
     [InlineData("Basic authentication is required", "Basic authentication is required")]
     [InlineData("Bearer token missing", "Bearer token missing")]
     public void M22_text_shaped_like_a_credential_is_masked_and_plain_words_are_not(string input, string expected)

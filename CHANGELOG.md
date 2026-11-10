@@ -20,7 +20,9 @@ Fixes from five independent reviews of 2.0.1 and from the reviews of the O11 con
 - **Bucket names reached error messages uncleaned, and a name ending in a line break was signed into a URL.** Google's library checked the name with a pattern that accepts a trailing line break and put the raw name in its own error. The connector now checks bucket names itself.
 - **The message cleaner missed some characters.** The Unicode line and paragraph separators (U+2028, U+2029), invisible formatting characters above U+FFFF and unpaired surrogates are now replaced too, and the 500-character cut no longer splits a character. The name of a downloaded File is cleaned the same way.
 - **A `ClientSecret` could still appear in an error.** 2.0.1 masked the plain and two URL-encoded forms, but not the exact form the secret is sent in when it contains a space and one of `! * ( )`, nor the HTTP Basic form of the second attempt. Both are now masked.
-- **A proxy that echoes the request could put a token in an error.** Text shaped like a bearer token, a Basic credential or a Google access token is now masked in every message, and a very long error page is cut before it is processed.
+- **A proxy that echoes the request could put a token in an error.** Text shaped like a bearer token, a Basic credential, a Google access token or a JWT is now masked in every message, so a `SubjectToken` that Google's token exchange repeats in its refusal no longer appears either. A very long error page is cut before it is processed.
+- **A secret echoed in the `Content-Type` of a non-JSON identity provider answer was printed.** That header value is now masked like the rest of the provider's text.
+- **URL signing was not repeated after a 408 or 429.** With Workload Identity Federation, Google's library repeats the signing request after a 500, 502, 503 or 504 only. The connector now repeats it after a 408, a 429 or a network error, and nothing else, so attempts are never multiplied.
 - **A `SubjectToken` of any shape and size was cached.** Each distinct value took an entry in three caches for at least 5 minutes: 100 values of a million characters held 196 MB. A value that does not have the shape of a JWT, or is longer than 32,768 characters, is now rejected before anything is cached. A JWT-shaped token that Google's token exchange refuses is dropped from the caches at once, so made-up tokens cannot push other apps' identities out.
 - **`ServiceAccountEmail` was not checked** and became part of a Google URL: a value such as `a/../../v1/other/x` changed the path the request went to. It must now be an e-mail address or the account's numeric unique ID.
 - **The object names `.` and `..` sent a download to another address.** In a URL they are path steps, so `Object_DownloadBinary` asked Google for the bucket or its listing instead of an object. Google does not allow these names; the connector now rejects them, and bucket names that start or end with a dot or dash, before any request.
@@ -56,7 +58,7 @@ Fixes from five independent reviews of 2.0.1 and from the reviews of the O11 con
 
 ### Tests
 
-- 404 tests (201 in 2.0.1), in six new files.
+- 411 tests (201 in 2.0.1), in six new files.
 - **New tests:**
   - a repeated delete, move, metadata update, bucket delete and bucket create after each kind of failure;
   - every action stopped by the deadline at each of its steps, a download whose body stalls, a copy that never finishes;
@@ -65,7 +67,7 @@ Fixes from five independent reviews of 2.0.1 and from the reviews of the O11 con
   - bucket names, content types, the message cleaner, File names, plain-text and non-JSON answers.
 - **Guarantees that no test proved before:** download checksums; each retried status, the 3-attempt limit and the retry window; the unguarded delete that is never repeated; the HTTP method each signed URL is signed for; the time budget and progress messages of `Object_DeleteByPrefix`; the 80-second request timeout; an unclear 404 on a copy; a 0-byte upload.
 - **Each fix is proven:** removing it makes a test fail.
-- **Reviewed twice before release:** two independent reviews of the finished change found one Medium issue each (the request timeout pre-empting the action deadline; made-up tokens holding cache slots) and eleven Low ones. Both Medium and nine Low findings are fixed above, each with a test.
+- **Reviewed twice before release:** two independent reviews of the finished change found one Medium issue each (the request timeout pre-empting the action deadline; made-up tokens holding cache slots) and eleven Low ones. Both Medium and nine Low findings are fixed above, each with a test. Three more fixes came from the O11 connector's 1.7.5 work: JWT-shaped text, the `Content-Type` echo and the signing retry.
 - The offline fake of Google no longer loops on a 0-byte upload.
 
 ## [2.0.1] - 2026-11-09

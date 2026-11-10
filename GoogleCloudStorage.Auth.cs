@@ -848,7 +848,7 @@ public partial class GoogleCloudStorage
                         string contentType = response.Content.Headers.ContentType != null
                             ? response.Content.Headers.ContentType.ToString()
                             : "none";
-                        detail = $"(non-JSON response, {Encoding.UTF8.GetByteCount(body)} bytes, Content-Type {Clean(contentType)})";
+                        detail = $"(non-JSON response, {Encoding.UTF8.GetByteCount(body)} bytes, Content-Type {SanitizeProviderText(contentType, _clientSecret, _clientId)})";
                     }
 
                     bool invalidClient = response.StatusCode == HttpStatusCode.Unauthorized || rawError == "invalid_client";
