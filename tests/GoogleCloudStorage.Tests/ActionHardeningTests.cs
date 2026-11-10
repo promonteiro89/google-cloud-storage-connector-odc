@@ -337,7 +337,7 @@ public sealed class ActionHardeningTests : IDisposable
         var ex = Assert.Throws<ArgumentException>(() =>
             _sut.Object_UploadBinary(ClientCredentials(), Bucket, "up.txt", new GcsFile { Content = [1], ContentType = "text/plain\r\nX-Evil: 1" }, []));
 
-        Assert.Contains("ContentType cannot contain line breaks", ex.Message);
+        Assert.Contains("ContentType can only contain printable ASCII characters", ex.Message);
         Assert.Empty(_backend.Requests);
     }
 
@@ -437,7 +437,7 @@ public sealed class ActionHardeningTests : IDisposable
     public void DL5_Download_timeout_is_translated_not_an_AggregateException_and_not_retried()
     {
         SeedContent("big.bin", new byte[10]);
-        _backend.StorageResponseOverride = req => IsMediaGet(req) ? throw new TaskCanceledException("simulated 80-second timeout") : null;
+        _backend.StorageResponseOverride = req => IsMediaGet(req) ? throw new TaskCanceledException("simulated request timeout") : null;
 
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_DownloadBinary(ClientCredentials(), Bucket, "big.bin", out _));
 
@@ -476,7 +476,7 @@ public sealed class ActionHardeningTests : IDisposable
     // ---- 2.0.0: findings from the O11 connector's 1.7.4 reviews ---------------------------
 
     [Fact]
-    public void R4_A_repeated_delete_answered_412_counts_as_deleted_and_leaves_the_new_object()
+    public void R4_A_repeated_delete_answered_412_reports_the_new_object_and_leaves_it()
     {
         Seed("doc.txt", 7);
         int deletes = 0;
@@ -488,11 +488,15 @@ public sealed class ActionHardeningTests : IDisposable
             return JsonError(HttpStatusCode.ServiceUnavailable, "Backend Error");
         };
 
-        _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt");
+        // 2.0.2: a 412 on the repeat no longer counts as deleted by itself; the connector looks, finds
+        // the newer object and says so (2.0.1 returned normally here).
+        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt"));
 
+        Assert.Contains("was replaced while it was being deleted: a newer version now exists and was not deleted", ex.Message);
         Assert.Equal(2, _backend.Requests.Count(IsRecordedDelete));
         Assert.Equal(8, _backend.Objects[$"{Bucket}/doc.txt"].Generation);
-        Assert.Single(_backend.Requests, r => r.Method == HttpMethod.Get && r.Uri.AbsolutePath.EndsWith("/o/doc.txt", StringComparison.Ordinal));
+        // The read before the delete, and the look after the 412.
+        Assert.Equal(2, _backend.Requests.Count(r => r.Method == HttpMethod.Get && r.Uri.AbsolutePath.EndsWith("/o/doc.txt", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -556,7 +560,7 @@ public sealed class ActionHardeningTests : IDisposable
     }
 
     [Fact]
-    public void R9_A_move_whose_repeated_source_delete_answers_412_succeeds()
+    public void R9_A_move_whose_repeated_source_delete_answers_412_reports_the_newer_source()
     {
         Seed("src.txt", 7);
         int deletes = 0;
@@ -567,8 +571,10 @@ public sealed class ActionHardeningTests : IDisposable
             return JsonError(HttpStatusCode.ServiceUnavailable, "Backend Error");
         };
 
-        _sut.Object_Move(ClientCredentials(), Bucket, "src.txt", Bucket, "dst.txt");
+        // 2.0.2: the connector looks before trusting the 412; the source exists again with newer data.
+        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Move(ClientCredentials(), Bucket, "src.txt", Bucket, "dst.txt"));
 
+        Assert.Contains("was modified during the move and was not deleted", ex.Message);
         Assert.Equal(2, _backend.Requests.Count(IsRecordedDelete));
         Assert.Equal(9, _backend.Objects[$"{Bucket}/src.txt"].Generation);
     }

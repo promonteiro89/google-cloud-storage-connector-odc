@@ -163,7 +163,7 @@ public class RegressionTests
 
         var timeout = Connector.TranslateException(new TaskCanceledException("slow"), TestSupport.Auth(), "b", "o");
         Assert.Contains("timed out", timeout.Message);
-        Assert.Contains("80 seconds", timeout.Message);
+        Assert.Contains("90 seconds", timeout.Message);
     }
 
     // ---- O12: the download cap on every write path --------------------------------------

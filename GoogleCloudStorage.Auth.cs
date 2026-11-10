@@ -11,6 +11,7 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace OutSystems.ExternalLibraries.GoogleCloudStorage_Connector;
 
@@ -84,6 +85,9 @@ internal sealed class ExpiringCache<T> where T : class
             return value;
         }
     }
+
+    /// <summary>Drops the key's entry, if any.</summary>
+    internal void Forget(string key) => _entries.TryRemove(key, out _);
 
     /// <summary>Returns the live entry for the key and marks it used; drops the entry when it has expired.</summary>
     private Entry? FindLive(string key, DateTime utcNow)
@@ -160,6 +164,10 @@ public partial class GoogleCloudStorage
 
     private const string StsTokenUrl = "https://sts.googleapis.com/v1/token";
     private const string JwtSubjectTokenType = "urn:ietf:params:oauth:token-type:jwt";
+    internal const int MaxSubjectTokenLength = 32768;
+    private static readonly Regex ServiceAccountEmailPattern = new(
+        @"^(?:[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*|[0-9]{1,30})\z",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
     /// Caches of StorageClient/UrlSigner instances per credential. Actions run on every request, and
@@ -173,16 +181,22 @@ public partial class GoogleCloudStorage
     private static readonly ExpiringCache<StorageClient> StorageClientCache = new();
     private static readonly ExpiringCache<UrlSigner> UrlSignerCache = new();
     private static readonly ExpiringCache<FederatedIdentity> FederatedIdentityCache = new();
+
+    /// <summary>How many federated identities, Storage clients and URL signers are cached (test seam).</summary>
+    internal static (int Identities, int StorageClients, int UrlSigners) CachedCounts =>
+        (FederatedIdentityCache.Count, StorageClientCache.Count, UrlSignerCache.Count);
     internal static readonly ExpiringCache<ServiceAccountCredential> ServiceAccountCredentialCache = new();
 
     /// <summary>
-    /// Timeout of each request to Google Cloud Storage, below ODC's 95-second limit for one action so
-    /// a stalled request fails with the connector's own message instead of the platform's timeout.
+    /// Timeout of each request to Google Cloud. It is a backstop: every action has its own deadline of
+    /// 85 seconds (88 for Object_DeleteByPrefix), which cancels the request and says what the action
+    /// was doing. The timeout sits above those deadlines, so it never pre-empts their message, and below
+    /// ODC's 95-second limit, so a request can never outlive the action even where no deadline applies.
     /// </summary>
-    internal static readonly TimeSpan StorageRequestTimeout = TimeSpan.FromSeconds(80);
+    internal static readonly TimeSpan StorageRequestTimeout = TimeSpan.FromSeconds(90);
 
     /// <summary>
-    /// Google's default client factory with the StorageRequestTimeout (80 s) instead of 100 s, for the
+    /// Google's default client factory with the StorageRequestTimeout (90 s) instead of 100 s, for the
     /// credentials' own calls (STS, impersonation, signBlob, service-account token): above ODC's 95-second
     /// action limit a stall would surface as the platform's timeout instead of the connector's message.
     /// </summary>
@@ -223,9 +237,8 @@ public partial class GoogleCloudStorage
         });
 
     /// <summary>
-    /// One deadline for the whole client-credentials exchange: both client-authentication attempts,
-    /// response headers and body. Separate limits let one token request take about 120 seconds, past
-    /// ODC's 95-second action limit. Test seam.
+    /// One connector-owned deadline for lock waiting and the whole client-credentials exchange,
+    /// independent of Google's per-attempt token refresh timeout. Test seam.
     /// </summary>
     internal static TimeSpan IdentityProviderDeadline { get; set; } = TimeSpan.FromSeconds(30);
 
@@ -278,6 +291,10 @@ public partial class GoogleCloudStorage
         }
         if (missing.Count > 0)
             throw new ArgumentException($"{MethodWorkloadIdentityFederation} authentication requires WorkloadIdentityProvider, ServiceAccountEmail, and either SubjectToken or TokenEndpoint + ClientId + ClientSecret (missing: {string.Join(", ", missing)}).");
+
+        string serviceAccountEmail = a.ServiceAccountEmail.Trim();
+        if (!ServiceAccountEmailPattern.IsMatch(serviceAccountEmail))
+            throw new ArgumentException($"ServiceAccountEmail '{Clean(a.ServiceAccountEmail)}' is not a service account email address (expected 'NAME@PROJECT_ID.iam.gserviceaccount.com', or the account's numeric unique ID).");
 
         NormalizeWorkloadIdentityProvider(a.WorkloadIdentityProvider); // throws on a malformed value
         if (string.IsNullOrWhiteSpace(a.SubjectToken))
@@ -378,10 +395,10 @@ public partial class GoogleCloudStorage
             sa,
             "client-credentials",
             a.TokenEndpoint?.Trim(),
-            a.ClientId,
+            a.ClientId?.Trim(),
             a.ClientSecret,
-            a.Scope,
-            a.Audience);
+            a.Scope?.Trim(),
+            a.Audience?.Trim());
     }
 
     // ---- Client factories ------------------------------------------------------------
@@ -505,6 +522,27 @@ public partial class GoogleCloudStorage
     }
 
     /// <summary>
+    /// Drops what was cached for a supplied token that Google or the token exchange rejected. A token
+    /// only has to look like a JWT to be cached, so without this a stream of made-up tokens would fill
+    /// the caches and push out the identities of other apps. No-op for client credentials.
+    /// </summary>
+    internal static void ForgetSuppliedToken(Authentication a)
+    {
+        try
+        {
+            if (ResolveAuthMethodSafe(a) != AuthMethod.WorkloadIdentityFederation || SuppliedToken(a) == null) return;
+            string key = FederatedCacheKey(a);
+            FederatedIdentityCache.Forget(key);
+            StorageClientCache.Forget(key);
+            UrlSignerCache.Forget(key);
+        }
+        catch (Exception)
+        {
+            // Never let cache housekeeping replace the error being reported.
+        }
+    }
+
+    /// <summary>
     /// Rejects a supplied token whose exp has already passed (allowing 30 seconds of clock skew),
     /// before it reaches Google STS. A token without a readable exp is left for Google to judge.
     /// </summary>
@@ -574,13 +612,32 @@ public partial class GoogleCloudStorage
         public DateTime ExpiresUtc { get; }
     }
 
+    private static bool IsJwtShaped(string token)
+    {
+        string[] parts = token.Split('.');
+        if (parts.Length != 3) return false;
+        foreach (string part in parts)
+        {
+            if (part.Length == 0) return false;
+            foreach (char c in part)
+                if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '='))
+                    return false;
+        }
+        return true;
+    }
+
     private static FederatedIdentity GetFederatedIdentity(Authentication a)
     {
-        // The expiry check runs before the cache lookup and before any network call: an expired
-        // token must never be exchanged, and a cached identity built from it must not be reused.
+        // Validate caller supplied tokens before hashing them into keys or touching any cache.
         string? supplied = SuppliedToken(a);
         if (supplied != null)
+        {
+            if (supplied.Length > MaxSubjectTokenLength)
+                throw new ArgumentException($"The SubjectToken is {supplied.Length} characters long; a JWT is at most 32768 characters. Supply the identity provider's JWT.");
+            if (!IsJwtShaped(supplied))
+                throw new ArgumentException("The SubjectToken is not a JWT: expected three base64url parts separated by dots (header.payload.signature). The value is not shown.");
             ValidateSubjectTokenExpiry(supplied);
+        }
 
         return FederatedIdentityCache.GetOrAdd(
             FederatedCacheKey(a),
@@ -590,7 +647,7 @@ public partial class GoogleCloudStorage
 
     private static FederatedIdentity CreateFederatedIdentity(Authentication a)
     {
-        var tokenSource = new SubjectTokenSource(SuppliedToken(a), a.TokenEndpoint?.Trim(), a.ClientId, a.ClientSecret, a.Scope, a.Audience);
+        var tokenSource = new SubjectTokenSource(SuppliedToken(a), a.TokenEndpoint?.Trim(), a.ClientId?.Trim(), a.ClientSecret, a.Scope?.Trim(), a.Audience?.Trim());
 
         var externalInitializer = new ProgrammaticExternalAccountCredential.Initializer(
             StsTokenUrl, NormalizeWorkloadIdentityProvider(a.WorkloadIdentityProvider), JwtSubjectTokenType, tokenSource)
@@ -654,13 +711,22 @@ public partial class GoogleCloudStorage
             if (!string.IsNullOrEmpty(_suppliedToken))
                 return _suppliedToken;
 
-            await _lock.WaitAsync(taskCancellationToken).ConfigureAwait(false);
+            using var deadline = new CancellationTokenSource(IdentityProviderDeadline);
+            string timedOut = $"The identity provider token endpoint '{EndpointDisplay}' did not respond within {IdentityProviderDeadline.TotalSeconds:0} seconds.";
+            try
+            {
+                await _lock.WaitAsync(deadline.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException e)
+            {
+                throw new IdentityProviderException(timedOut, e);
+            }
             try
             {
                 if (_cachedToken != null && DateTimeOffset.UtcNow < _cachedUntil)
                     return _cachedToken;
 
-                var (token, lifetime) = await RequestClientCredentialsTokenAsync(taskCancellationToken).ConfigureAwait(false);
+                var (token, lifetime) = await RequestClientCredentialsTokenAsync(deadline.Token).ConfigureAwait(false);
                 _cachedToken = token;
                 // Refresh a minute early (or halfway through a very short lifetime).
                 var margin = lifetime > TimeSpan.FromMinutes(2) ? TimeSpan.FromMinutes(1) : TimeSpan.FromTicks(lifetime.Ticks / 2);
@@ -689,8 +755,6 @@ public partial class GoogleCloudStorage
                 http = IdentityProviderHttp.Value;
             }
 
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            deadline.CancelAfter(IdentityProviderDeadline);
             string timedOut = $"The identity provider token endpoint '{EndpointDisplay}' did not respond within {IdentityProviderDeadline.TotalSeconds:0} seconds.";
 
             // client_secret_post first (Entra ID, Auth0, Keycloak); if the provider rejects the client,
@@ -717,13 +781,10 @@ public partial class GoogleCloudStorage
                 HttpResponseMessage response;
                 try
                 {
-                    response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
+                    response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
                 }
                 catch (Exception e) when (e is HttpRequestException || e is TaskCanceledException)
                 {
-                    // A cancelled caller token is not a timeout: propagate it unchanged.
-                    if (ct.IsCancellationRequested)
-                        throw;
                     if (e is TaskCanceledException)
                         throw new IdentityProviderException(timedOut, e);
                     throw new IdentityProviderException($"Could not reach the identity provider token endpoint '{EndpointDisplay}': {Clean(e.Message)}", e);
@@ -735,12 +796,10 @@ public partial class GoogleCloudStorage
                     // The same deadline bounds the body, which ResponseHeadersRead leaves outside SendAsync.
                     try
                     {
-                        body = await ReadBoundedAsync(response.Content, MaxIdentityProviderResponseBytes, deadline.Token).ConfigureAwait(false);
+                        body = await ReadBoundedAsync(response.Content, MaxIdentityProviderResponseBytes, ct).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException e)
                     {
-                        if (ct.IsCancellationRequested)
-                            throw;
                         throw new IdentityProviderException(timedOut, e);
                     }
                     catch (Exception e) when (e is HttpRequestException || e is IOException)
@@ -778,8 +837,8 @@ public partial class GoogleCloudStorage
                     if (ParseOAuthError(body, out var error, out var description))
                     {
                         rawError = error;
-                        if (error != null) error = SanitizeProviderText(error, _clientSecret);
-                        if (description != null) description = SanitizeProviderText(description, _clientSecret);
+                        if (error != null) error = SanitizeProviderText(error, _clientSecret, _clientId);
+                        if (description != null) description = SanitizeProviderText(description, _clientSecret, _clientId);
                         detail = error == null && description == null
                             ? "(the response body contained no 'error' or 'error_description')"
                             : error == null ? description! : description == null ? error : $"{error}: {description}";
@@ -834,23 +893,23 @@ public partial class GoogleCloudStorage
 
         /// <summary>
         /// Makes text from the identity provider safe to put in a message: the client secret (some
-        /// providers echo the request, plain or URL-encoded as it was sent) is masked, control and invisible
-        /// formatting characters become spaces, and it is cut at 300 characters.
+        /// providers echo the request, plain or URL-encoded, including the exact form-encoded bytes it was
+        /// sent as) is masked, and the text is cleaned like every other message and cut at 300 characters.
         /// </summary>
-        private static string SanitizeProviderText(string text, string? secret)
+        private static string SanitizeProviderText(string text, string? secret, string? clientId)
         {
             if (!string.IsNullOrEmpty(secret))
             {
+                // The credential of the HTTP Basic attempt, in case the provider echoes the Authorization header.
+                string basic = Convert.ToBase64String(Encoding.UTF8.GetBytes(
+                    Uri.EscapeDataString(clientId ?? string.Empty) + ":" + Uri.EscapeDataString(secret)));
+                text = text.Replace(basic, "***", StringComparison.Ordinal);
                 text = text.Replace(secret, "***", StringComparison.Ordinal);
-                foreach (var encoded in new[] { Uri.EscapeDataString(secret), WebUtility.UrlEncode(secret) })
+                foreach (var encoded in new[] { Uri.EscapeDataString(secret), WebUtility.UrlEncode(secret), Uri.EscapeDataString(secret).Replace("%20", "+", StringComparison.Ordinal) })
                     if (encoded != secret)
                         text = text.Replace(encoded, "***", StringComparison.OrdinalIgnoreCase);
             }
-            var chars = text.ToCharArray();
-            for (int i = 0; i < chars.Length; i++)
-                if (char.IsControl(chars[i]) || char.GetUnicodeCategory(chars[i]) == System.Globalization.UnicodeCategory.Format) chars[i] = ' ';
-            text = new string(chars);
-            return text.Length > 300 ? text[..300] + "..." : text;
+            return Clean(text, 300);
         }
 
         private static (string token, int expiresIn) ParseTokenResponse(string body)
@@ -954,7 +1013,7 @@ public partial class GoogleCloudStorage
     /// </summary>
     private static Exception FriendlySigningException(Google.GoogleApiException e, Authentication a)
     {
-        string details = e.Error != null && !string.IsNullOrEmpty(e.Error.Message) ? e.Error.Message : e.Message;
+        string details = ErrorDetails(e);
         if (ResolveAuthMethodSafe(a) == AuthMethod.WorkloadIdentityFederation)
         {
             if (e.HttpStatusCode == HttpStatusCode.Forbidden)

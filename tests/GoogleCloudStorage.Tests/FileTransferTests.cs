@@ -115,7 +115,7 @@ public sealed class FileTransferTests : IDisposable
         var ex = Assert.Throws<ArgumentException>(() =>
             _sut.Object_Upload(Federated(), "my-bucket", "a.txt", file, "text/plain\r\nX-Evil: 1", Array.Empty<MetadataEntry>()));
 
-        Assert.Contains("line breaks", ex.Message);
+        Assert.Contains("ContentType can only contain printable ASCII characters", ex.Message);
         Assert.Empty(_backend.Requests);
     }
 
@@ -156,7 +156,7 @@ public sealed class FileTransferTests : IDisposable
             _sut.Object_Upload(Federated(), "my-bucket", "slow.bin", file, "", Array.Empty<MetadataEntry>()));
 
         Assert.Contains("did not finish within", ex.Message);
-        Assert.Contains("nothing was stored", ex.Message);
+        Assert.Contains("may not have been stored: check with Object_Exists", ex.Message);
         Assert.Contains("Object_GetSignedUrl", ex.Message);
         Assert.False(_backend.StoredObjects.ContainsKey("my-bucket/slow.bin"));
     }

@@ -393,9 +393,11 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
         MemoryStream buffer;
         lock (_uploadSessions) buffer = _uploadBuffers[uploadId];
         var range = request.Content?.Headers.ContentRange;
-        if (range != null && !range.HasRange && content.Length == 0)
+        if (range != null && !range.HasRange && !range.HasLength && content.Length == 0)
         {
-            // A status query ("Content-Range: bytes */*" with no body) after an interrupted chunk: say what arrived.
+            // A status query ("Content-Range: bytes */*": neither a range nor a known total, no body) after an
+            // interrupted chunk: say what arrived. An empty body with a known total ("bytes */0", the final
+            // request of a 0-byte upload) is not a query: it falls through and completes the upload.
             var status = new HttpResponseMessage((HttpStatusCode)308) { Content = new StringContent("") };
             if (buffer.Length > 0) status.Headers.TryAddWithoutValidation("Range", $"bytes=0-{buffer.Length - 1}");
             return status;
