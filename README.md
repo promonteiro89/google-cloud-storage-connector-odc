@@ -61,6 +61,7 @@ The connector is architected as an **adapter**. It bridges the OutSystems Develo
 - A Service Account with the following IAM roles:
   - `Storage Object Admin` (full object control)
   - `Storage Admin` (required for bucket management)
+  - `Bucket_Exists` with Storage Object Admin only: add `Storage Legacy Bucket Reader` on the bucket (it grants `storage.buckets.get`).
 - With **Workload Identity Federation**: grant the federated identity `Workload Identity User` on the service account, plus `Service Account Token Creator` for **Signed URLs** (signing goes through the IAM `signBlob` API). With a **service account key**, signed URLs are signed locally and need no extra role.
 
 ---
@@ -159,6 +160,8 @@ Then set `WorkloadIdentityProvider` to `//iam.googleapis.com/projects/$PROJECT_N
 | `ProjectId` | `project_id` | Your Google Cloud project ID |
 | `ClientEmail` | `client_email` | Service account email |
 | `PrivateKey` | `private_key` | Full RSA private key (with BEGIN/END headers) |
+
+> **Key creation may be blocked.** Google Cloud organizations created since 2024 enforce the policy `constraints/iam.disableServiceAccountKeyCreation` by default, so creating a key fails. Use Workload Identity Federation instead (no key needed), or have someone with `Organization Policy Administrator` (`roles/orgpolicy.policyAdmin`) relax the policy for the project.
 
 ---
 
@@ -380,7 +383,7 @@ Generates a time-limited V4 signed URL for secure, direct-to-browser file access
 | `bucketName` | `Text` | Source bucket |
 | `objectName` | `Text` | Full path/filename. Required: an empty name would sign a URL for the whole bucket. |
 | `expirationMinutes` | `Integer` | Link validity duration, `1`–`10080` (a V4 signed URL is valid for at most 7 days). Values outside this range raise a clear error. With `WorkloadIdentityFederation`, Google guarantees a `signBlob` signature for **12 hours** only: a longer URL may stop working earlier when Google rotates its signing keys. Use a service account key if you need longer-lived URLs. |
-| `operation` | `Text` | Optional. `Download` (GET), `Upload` (PUT), or `Delete` (DELETE). Case-insensitive. Defaults to `Download`. |
+| `operation` | `Text` | Optional. `Download` (GET), `Upload` (PUT), or `Delete` (DELETE). Case-insensitive. Defaults to `Download` when the input is not set; an empty text is rejected ("Invalid Operation ''"). |
 | `contentType` | `Text` | Optional, `Upload` URLs only (ignored for `Download` and `Delete`). The exact `Content-Type` the client will send in the PUT request. It becomes part of the signature, so Google rejects uploads with a different `Content-Type`. Leave empty to allow any. Must be printable ASCII. |
 
 **Outputs:**
@@ -435,7 +438,7 @@ Decommissioning of an empty storage container. The request is repeated on transi
 | `bucketName` | `Text` | Name of the bucket to delete |
 
 #### `Bucket_Exists`
-Checks whether a bucket exists and is accessible to the service account, without listing its contents. It needs `storage.buckets.get`, which **Storage Object Admin does not include**: grant Storage Admin (or a custom role with that permission), otherwise the action fails with an access-denied error instead of returning a value.
+Checks whether a bucket exists and is accessible to the service account, without listing its contents. It needs `storage.buckets.get`, which **Storage Object Admin does not include**: grant Storage Admin, or keep Storage Object Admin and add Storage Legacy Bucket Reader on the bucket (or a custom role with that permission), otherwise the action fails with an access-denied error instead of returning a value.
 
 **Arguments:**
 | Argument | Type | Description |

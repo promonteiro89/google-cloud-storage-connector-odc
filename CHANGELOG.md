@@ -49,6 +49,7 @@ Fixes from five independent reviews of 2.0.1 and from the reviews of the O11 con
 - README: the 85-second deadline, what is retried, how a repeat is judged, the input checks, the 30-second identity provider limit, gzip downloads (not checksum-checked, 2 GB measured on the stored size), Google's 403 for a missing object when the role cannot list, CORS for browser uploads, what an upload URL cannot limit, and bucket defaults.
 - ODC Self-Hosted: the README no longer says the File type is missing there; it says the File actions have not been verified.
 - New `NOTICE` file listing the third-party libraries in the release package and their licences.
+- `Bucket_Exists` with Storage Object Admin: Storage Legacy Bucket Reader on the bucket is enough; the `Operation` input of `Object_GetSignedUrl` defaults to `Download` only when not set, and an empty text is rejected; service account key creation can be blocked by the `iam.disableServiceAccountKeyCreation` organization policy.
 
 ### Not changed, on purpose
 
