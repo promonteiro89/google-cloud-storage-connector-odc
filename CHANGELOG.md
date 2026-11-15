@@ -39,6 +39,7 @@ Fixes from five independent reviews of 2.0.1 and from the reviews of the O11 con
 
 ### Changed
 
+- **Tokens are limited to Cloud Storage.** The service account key sign-in and the impersonated token of Workload Identity Federation now request `devstorage.full_control` instead of `cloud-platform`, so a token in memory or in a dump cannot reach other Google Cloud APIs the service account has roles for. Signed URLs are unaffected: with federation, Google's library signs with the source credential re-scoped to IAM.
 - **Rejected before any request, with a clear message:** a bucket name with characters other than lowercase letters, digits, dashes, underscores and dots, one that starts or ends with a dot, dash or underscore, or one longer than 222 characters; the object names `.` and `..`; a content type that is not printable ASCII; control characters in the header values of `Object_UpdateMetadata`; a `SubjectToken` that is not JWT-shaped or is longer than 32,768 characters; a `ServiceAccountEmail` that is neither an e-mail address nor a numeric unique ID. Spaces and line breaks around `ClientId`, `Scope` and `Audience` are ignored.
 - **Repeats of `Bucket_Create` and `Bucket_Delete`** now follow the connector's rule (3 attempts in all) instead of Google's library's longer back-off.
 - **Request timeout:** 90 seconds per request to Google (80 before). Every action stops itself at 85 seconds (88 for `Object_DeleteByPrefix`), so the request timeout is only a backstop.
@@ -59,7 +60,7 @@ Fixes from five independent reviews of 2.0.1 and from the reviews of the O11 con
 
 ### Tests
 
-- 411 tests (201 in 2.0.1), in six new files.
+- 413 tests (201 in 2.0.1), in seven new files.
 - **New tests:**
   - a repeated delete, move, metadata update, bucket delete and bucket create after each kind of failure;
   - every action stopped by the deadline at each of its steps, a download whose body stalls, a copy that never finishes;

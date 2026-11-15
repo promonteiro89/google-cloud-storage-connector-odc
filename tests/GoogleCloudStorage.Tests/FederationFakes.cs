@@ -129,6 +129,12 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
             return Json(HttpStatusCode.OK, new { access_token = IdpToken, token_type = "Bearer", expires_in = IdpExpiresIn });
         }
 
+        if (url.StartsWith("https://oauth2.googleapis.com/token", StringComparison.Ordinal))
+        {
+            // Service account key sign-in (JWT bearer grant).
+            return Json(HttpStatusCode.OK, new { access_token = ServiceAccountToken, token_type = "Bearer", expires_in = 3600 });
+        }
+
         if (url.StartsWith("https://sts.googleapis.com/v1/token", StringComparison.Ordinal))
         {
             if (StsError != null)

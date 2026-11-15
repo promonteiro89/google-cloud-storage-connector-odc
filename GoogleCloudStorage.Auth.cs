@@ -487,7 +487,8 @@ public partial class GoogleCloudStorage
         {
             var initializer = new ServiceAccountCredential.Initializer(authentication.ClientEmail?.Trim())
             {
-                Scopes = [StorageService.Scope.CloudPlatform],
+                // Storage only: a leaked token cannot reach other Google Cloud APIs the account has roles for.
+                Scopes = [StorageService.Scope.DevstorageFullControl],
                 HttpClientFactory = HttpClientFactoryOverride ?? CredentialHttpClientFactory
             }.FromPrivateKey(authentication.PrivateKey.Replace("\\n", "\n"));
 
@@ -657,9 +658,12 @@ public partial class GoogleCloudStorage
         externalInitializer.HttpClientFactory = HttpClientFactoryOverride ?? CredentialHttpClientFactory;
         var federated = GoogleCredential.FromProgrammaticExternalAccountCredential(new ProgrammaticExternalAccountCredential(externalInitializer));
 
+        // The federated source keeps cloud-platform: it calls IAM Credentials generateAccessToken. The
+        // impersonated token is Storage only. URL signing is unaffected: the library signs with the source
+        // credential re-scoped to iam (Google.Apis.Auth 1.78 ImpersonatedCredential.SignBlobAsync).
         var impersonationInitializer = new ImpersonatedCredential.Initializer(a.ServiceAccountEmail.Trim())
         {
-            Scopes = [StorageService.Scope.CloudPlatform]
+            Scopes = [StorageService.Scope.DevstorageFullControl]
         };
         impersonationInitializer.HttpClientFactory = HttpClientFactoryOverride ?? CredentialHttpClientFactory;
 
