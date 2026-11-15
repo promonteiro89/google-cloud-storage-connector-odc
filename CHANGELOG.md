@@ -42,7 +42,7 @@ Fixes from five independent reviews of 2.0.1 and from the reviews of the O11 con
 - **Rejected before any request, with a clear message:** a bucket name with characters other than lowercase letters, digits, dashes, underscores and dots, one that starts or ends with a dot, dash or underscore, or one longer than 222 characters; the object names `.` and `..`; a content type that is not printable ASCII; control characters in the header values of `Object_UpdateMetadata`; a `SubjectToken` that is not JWT-shaped or is longer than 32,768 characters; a `ServiceAccountEmail` that is neither an e-mail address nor a numeric unique ID. Spaces and line breaks around `ClientId`, `Scope` and `Audience` are ignored.
 - **Repeats of `Bucket_Create` and `Bucket_Delete`** now follow the connector's rule (3 attempts in all) instead of Google's library's longer back-off.
 - **Request timeout:** 90 seconds per request to Google (80 before). Every action stops itself at 85 seconds (88 for `Object_DeleteByPrefix`), so the request timeout is only a backstop.
-- **Action descriptions** corrected for `Object_UpdateMetadata`, `Object_UploadBinary`, `Bucket_Exists` and the `Operation` and `ContentType` inputs.
+- **Action descriptions** corrected for `Object_UpdateMetadata`, `Object_UploadBinary`, `Bucket_Exists` and the `Operation` and `ContentType` inputs; `PrivateKey` now also advises a Secret setting, as `ClientSecret` does.
 
 ### Documentation
 

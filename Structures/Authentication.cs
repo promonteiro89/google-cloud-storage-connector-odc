@@ -32,7 +32,7 @@ public struct Authentication
     [OSStructureField(Description = "ServiceAccountKey only: the 'client_email' from your Service Account JSON key.")]
     public string ClientEmail { get; set; }
 
-    [OSStructureField(Description = "ServiceAccountKey only: the 'private_key' from your Service Account JSON key.")]
+    [OSStructureField(Description = "ServiceAccountKey only: the 'private_key' from your Service Account JSON key. Store it as a Secret setting.")]
     public string PrivateKey { get; set; }
 
     // ---- WorkloadIdentityFederation (recommended) ---------------------------------------
