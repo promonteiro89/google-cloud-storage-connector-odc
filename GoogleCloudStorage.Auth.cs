@@ -637,9 +637,9 @@ public partial class GoogleCloudStorage
         if (supplied != null)
         {
             if (supplied.Length > MaxSubjectTokenLength)
-                throw new ArgumentException($"The SubjectToken is {supplied.Length} characters long; a JWT is at most 32768 characters. Supply the identity provider's JWT.");
+                throw new ArgumentException($"The SubjectToken is {supplied.Length} characters long; a JWT is at most a few thousand. Supply the identity provider's signed JWT.");
             if (!IsJwtShaped(supplied))
-                throw new ArgumentException("The SubjectToken is not a JWT: expected three base64url parts separated by dots (header.payload.signature). The value is not shown.");
+                throw new ArgumentException("The SubjectToken is not a JWT (three base64url parts separated by dots). Supply the identity provider's signed JWT, without a 'Bearer ' prefix.");
             ValidateSubjectTokenExpiry(supplied);
         }
 
@@ -886,7 +886,7 @@ public partial class GoogleCloudStorage
                 total += read;
             }
             if (total > maxBytes)
-                throw new IdentityProviderException($"The identity provider token endpoint '{EndpointDisplay}' returned a response larger than 1 MB. Check TokenEndpoint.");
+                throw new IdentityProviderException($"The identity provider token endpoint '{EndpointDisplay}' sent a response larger than 1 MB; a token response is a few kilobytes. Check TokenEndpoint.");
             Encoding encoding = Encoding.UTF8;
             string? charset = content.Headers.ContentType?.CharSet?.Trim('"');
             if (!string.IsNullOrEmpty(charset))

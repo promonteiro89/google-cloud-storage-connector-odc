@@ -306,4 +306,17 @@ public sealed class Version210Tests : IDisposable
 
         Assert.Contains("X-Goog-Expires=604800", url);
     }
+
+    // ---- W: O11's wording, adopted in 2.1.0 -----------------------------------------------
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void W1_signed_url_without_an_object_name_uses_the_O11_message(string objectName)
+    {
+        var ex = Assert.Throws<ArgumentException>(() => _sut.Object_GetSignedUrl(Federated(), "my-bucket", objectName, 60, out _, "Download"));
+
+        Assert.Equal("ObjectName is required; a signed URL without an object name would grant access to the bucket itself.", ex.Message);
+        Assert.Empty(_backend.Requests);
+    }
 }

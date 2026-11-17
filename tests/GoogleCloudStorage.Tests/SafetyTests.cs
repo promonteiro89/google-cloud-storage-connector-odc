@@ -149,7 +149,7 @@ public sealed class SafetyTests : IDisposable
         };
 
         var translated = Connector.TranslateException(apiEx, ClientCredentials(), "test-bucket-alpha", "obj.txt");
-        Assert.Contains("rejected before it was sent", translated.Message);
+        Assert.Contains("rejected by the Google Cloud Storage client library before it was sent", translated.Message);
         Assert.DoesNotContain("(0 0)", translated.Message);
     }
 
@@ -294,7 +294,7 @@ public sealed class SafetyTests : IDisposable
 
         Assert.Contains("src.txt", ex.Message);
         Assert.Contains("dstb", ex.Message);
-        Assert.Contains("checking the source failed", ex.Message);
+        Assert.Contains("checking which one failed", ex.Message);
     }
 
     [Fact]

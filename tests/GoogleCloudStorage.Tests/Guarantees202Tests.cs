@@ -178,7 +178,7 @@ public sealed class Guarantees202Tests : IDisposable
 
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_DeleteByPrefix(Federated(), Bucket, "pfx/", out _));
 
-        var match = Regex.Match(ex.Message, @"Deleted (\d+) objects under prefix 'pfx/' before the 0-second time budget");
+        var match = Regex.Match(ex.Message, @"Deleted (\d+) object\(s\) under prefix 'pfx/' before the 0-second time budget");
         Assert.True(match.Success, ex.Message);
         int n = int.Parse(match.Groups[1].Value);
         Assert.InRange(n, 1, 9);
@@ -195,7 +195,7 @@ public sealed class Guarantees202Tests : IDisposable
 
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_DeleteByPrefix(Federated(), Bucket, "pfx/", out _));
 
-        Assert.StartsWith("Deleted 1 objects under prefix 'pfx/', then failed on 'pfx/b':", ex.Message);
+        Assert.StartsWith("Deleted 1 object(s) under prefix 'pfx/', then failed on 'pfx/b':", ex.Message);
         Assert.Contains("Access denied", ex.Message);
     }
 
@@ -210,7 +210,7 @@ public sealed class Guarantees202Tests : IDisposable
 
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_DeleteByPrefix(Federated(), Bucket, "pfx/", out _));
 
-        Assert.StartsWith("Deleted 2 objects under prefix 'pfx/', then listing the remaining objects failed:", ex.Message);
+        Assert.StartsWith("Deleted 2 object(s) under prefix 'pfx/', then listing the next page failed:", ex.Message);
     }
 
     [Fact]
@@ -222,7 +222,7 @@ public sealed class Guarantees202Tests : IDisposable
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_DeleteByPrefix(Federated(), Bucket, "pfx/", out _));
 
         Assert.StartsWith("Access denied", ex.Message);
-        Assert.DoesNotContain("Deleted 0 objects", ex.Message);
+        Assert.DoesNotContain("Deleted 0 object(s)", ex.Message);
     }
 
     // ---- G7: the signed URL is signed for the right method ----------------------------
@@ -439,7 +439,7 @@ public sealed class Guarantees202Tests : IDisposable
 
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Copy(Federated(), "src-bucket", "src.txt", "dst-bucket", "dst.txt"));
 
-        Assert.StartsWith("The copy from 'src-bucket/src.txt' failed with 404: either that source object or the destination bucket 'dst-bucket' does not exist, and checking the source failed:", ex.Message);
+        Assert.StartsWith("The source object 'src-bucket/src.txt' or the destination bucket 'dst-bucket' does not exist, and checking which one failed:", ex.Message);
     }
 
     // ---- G19-G20: an empty upload stores an empty object ------------------------------

@@ -25,6 +25,11 @@ Parity with the O11 connector's 2.0.0: secure bucket defaults, create-only uploa
   - the `Generation` output.
 - **`Object` (the entries of `Object_List`):** `Generation`, `MD5Hash` and `Crc32c`, filled from the listing without extra requests.
 
+### Changed
+
+- **`Object_Delete` deletes an object replaced during the call, as the O11 connector does.** If the object is replaced between the read and the delete, the connector reads the new generation and deletes that, up to 3 times. It used to report the replacement and delete nothing. If the object keeps being replaced, the action fails with "The object '…/…' was replaced by other requests on each of 3 attempts to delete it, so it was not deleted. Retry the delete." An object found gone after the read now counts as deleted (it used to be reported as not found after a 408 or 429). After a repeat whose earlier attempt may have been applied, a newer object is still left alone and reported.
+- **Messages use the O11 connector's wording** where both connectors behave the same: could not reach Google, a proxy or sign-in page answering instead of Google, an identity provider response over 1 MB, a malformed or oversized `SubjectToken`, a concurrent metadata change, a metadata update that may already have been applied, a move whose source changed (now with the generation read), a copy 404 whose look-up failed, `Object_DeleteByPrefix` progress ("Deleted N object(s)…, then listing the next page failed"), a request rejected by the client library, a signed URL without `ObjectName` ("ObjectName is required; a signed URL without an object name would grant access to the bucket itself.") and a missing `ProjectId` ("Bucket_List requires Authentication.ProjectId."). Apps that match on message text must be updated.
+
 ### Migrating from 2.0.x
 
 1. Set `AuthenticationMethod` to `ServiceAccountKey` wherever it was left empty (for example in the setting that drives it).
@@ -34,8 +39,8 @@ Parity with the O11 connector's 2.0.0: secure bucket defaults, create-only uploa
 
 ### Tests
 
-- 441 tests (413 in 2.0.2). `Version210Tests` mirrors the O11 connector's U1–U8, B1–B3, L1, A1–A3 and S1–S3, and runs each upload test on both upload actions. The "different bytes" case keeps the same length, so the MD5 check really is tested.
-- Each new check is proven by a deliberate break: 18 mutants, each caught by a test.
+- 444 tests (413 in 2.0.2). `Version210Tests` mirrors the O11 connector's U1–U8, B1–B3, L1, A1–A3 and S1–S3, and runs each upload test on both upload actions. The "different bytes" case keeps the same length, so the MD5 check really is tested.
+- Each new check is proven by a deliberate break: 23 mutants (18 for the O11 2.0.0 items, 5 for `Object_Delete`), each caught by a test.
 
 ## [2.0.2] - Not released separately (included in 2.1.0)
 

@@ -48,7 +48,7 @@ public sealed class ScopeTests : IDisposable
     }
 
     [Fact]
-    public void S1_key_sign_in_requests_the_storage_scope_only()
+    public async Task S1_key_sign_in_requests_the_storage_scope_only()
     {
         var auth = new Authentication
         {
@@ -60,7 +60,7 @@ public sealed class ScopeTests : IDisposable
         // Ask the connector's own key credential for a token; the request goes to the fake, never to Google.
         var create = typeof(Connector).GetMethod("CreateServiceAccountCredential", BindingFlags.NonPublic | BindingFlags.Static)!;
         var credential = (Google.Apis.Auth.OAuth2.ServiceAccountCredential)create.Invoke(null, [auth])!;
-        credential.GetAccessTokenForRequestAsync().GetAwaiter().GetResult();
+        await credential.GetAccessTokenForRequestAsync();
 
         var token = Single("https://oauth2.googleapis.com/token");
         string scope = JwtPayload(token.Form["assertion"]).GetProperty("scope").GetString()!;

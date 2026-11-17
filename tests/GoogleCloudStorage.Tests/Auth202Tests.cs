@@ -130,7 +130,7 @@ public sealed class Auth202Tests : IDisposable
     public void A6_garbage_subject_is_rejected_before_http()
     {
         var ex = Assert.Throws<ArgumentException>(() => Call(Supplied("garbage")));
-        Assert.Equal("The SubjectToken is not a JWT: expected three base64url parts separated by dots (header.payload.signature). The value is not shown.", ex.Message);
+        Assert.Equal("The SubjectToken is not a JWT (three base64url parts separated by dots). Supply the identity provider's signed JWT, without a 'Bearer ' prefix.", ex.Message);
         Assert.Equal(0, Requests);
     }
 
@@ -144,7 +144,7 @@ public sealed class Auth202Tests : IDisposable
     {
         var ex = Assert.Throws<ArgumentException>(() => Call(Supplied(token)));
         Assert.DoesNotContain(token, ex.Message);
-        Assert.Contains("expected three base64url parts", ex.Message);
+        Assert.Contains("is not a JWT (three base64url parts", ex.Message);
         Assert.Equal(0, Requests);
     }
 

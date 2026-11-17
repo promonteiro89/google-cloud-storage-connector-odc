@@ -143,7 +143,7 @@ public sealed class ActionHardeningTests : IDisposable
 
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_DeleteByPrefix(ClientCredentials(), Bucket, "pfx/", out _));
 
-        Assert.Contains("Deleted 0 objects", ex.Message);
+        Assert.Contains("Deleted 0 object(s)", ex.Message);
         Assert.DoesNotContain(_backend.Requests, IsRecordedDelete);
     }
 
@@ -239,14 +239,42 @@ public sealed class ActionHardeningTests : IDisposable
     }
 
     [Fact]
-    public void D3_Delete_of_a_replaced_object_reports_it_and_deletes_nothing()
+    public void D3b_Delete_answered_412_whose_object_is_then_gone_counts_as_deleted()
     {
         Seed("doc.txt", 7);
-        _backend.StorageResponseOverride = req => IsDelete(req) ? JsonError(HttpStatusCode.PreconditionFailed, "Precondition Failed") : null;
+        int deletes = 0;
+        _backend.StorageResponseOverride = req =>
+        {
+            if (!IsDelete(req) || ++deletes > 1) return null;
+            // Someone else deletes the object between our read and our delete.
+            lock (_backend.Objects) _backend.Objects.Remove($"{Bucket}/doc.txt");
+            return JsonError(HttpStatusCode.PreconditionFailed, "Precondition Failed");
+        };
 
-        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt"));
+        _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt");
 
-        Assert.Contains("was replaced while it was being deleted", ex.Message);
+        Assert.Equal(1, _backend.Requests.Count(IsRecordedDelete));
+        Assert.Empty(_backend.Objects);
+    }
+
+    [Fact]
+    public void D3_Delete_of_an_object_replaced_after_the_read_deletes_the_new_generation()
+    {
+        Seed("doc.txt", 7);
+        int deletes = 0;
+        _backend.StorageResponseOverride = req =>
+        {
+            if (!IsDelete(req) || ++deletes > 1) return null;
+            // A writer replaces the object between the read and the delete.
+            lock (_backend.Objects) _backend.Objects[$"{Bucket}/doc.txt"] = new FakeFederationBackend.FakeObject(8, 1);
+            return JsonError(HttpStatusCode.PreconditionFailed, "Precondition Failed");
+        };
+
+        _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt");
+
+        var second = _backend.Requests.Where(IsRecordedDelete).Last();
+        Assert.Equal("8", HttpUtility.ParseQueryString(second.Uri.Query)["ifGenerationMatch"]);
+        Assert.Empty(_backend.Objects);
     }
 
     [Fact]
@@ -365,8 +393,8 @@ public sealed class ActionHardeningTests : IDisposable
         var list = Assert.Throws<ArgumentException>(() => _sut.Bucket_List(auth, out _));
         var create = Assert.Throws<ArgumentException>(() => _sut.Bucket_Create(auth, "new-bucket", "US"));
 
-        Assert.Contains("ProjectId cannot be empty", list.Message);
-        Assert.Contains("ProjectId cannot be empty", create.Message);
+        Assert.Equal("Bucket_List requires Authentication.ProjectId.", list.Message);
+        Assert.Equal("Bucket_Create requires Authentication.ProjectId.", create.Message);
         Assert.Empty(_backend.Requests);
     }
 
@@ -544,7 +572,7 @@ public sealed class ActionHardeningTests : IDisposable
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_UpdateMetadata(ClientCredentials(), Bucket, "doc.txt", "text/csv", "", "", "", Array.Empty<MetadataEntry>()));
 
         Assert.Contains("may already have been applied", ex.Message);
-        Assert.Contains("Object_GetMetadata", ex.Message);
+        Assert.Contains("Read the object's metadata before retrying", ex.Message);
         Assert.DoesNotContain("nothing was changed", ex.Message);
     }
 

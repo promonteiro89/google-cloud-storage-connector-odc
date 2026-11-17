@@ -417,8 +417,8 @@ public sealed class Messages202Tests : IDisposable
 
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_GetMetadata(Federated(), "my-bucket", "a.txt", out _, out _, out _));
 
-        Assert.Contains("not valid JSON", ex.Message);
-        Assert.DoesNotContain("an input is invalid", ex.Message);
+        Assert.Contains("The answer to the request was not from Google Cloud Storage: a proxy, firewall or sign-in page probably answered in its place.", ex.Message);
+        Assert.DoesNotContain("client library", ex.Message);
     }
 
     // ---- M22-M28: fixes from the second independent review ---------------------------

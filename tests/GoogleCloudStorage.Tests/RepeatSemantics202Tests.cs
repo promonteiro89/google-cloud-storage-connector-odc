@@ -156,29 +156,31 @@ public sealed class RepeatSemantics202Tests : IDisposable
     // ---- S1-S9: Object_Delete ---------------------------------------------------------
 
     [Fact]
-    public void S1_A_delete_refused_with_429_then_412_reports_the_new_version_without_probing()
+    public void S1_A_delete_refused_with_429_then_412_reads_the_new_generation_and_deletes_it_like_O11()
     {
         Seed("doc.txt", 7);
         _backend.StorageResponseOverride = TwoAnswers(HttpStatusCode.TooManyRequests, HttpStatusCode.PreconditionFailed);
 
-        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt"));
+        _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt");
 
-        Assert.Contains("was replaced while it was being deleted: a newer version now exists", ex.Message);
-        Assert.Equal(2, _backend.Requests.Count(IsRecordedDelete));
-        Assert.Equal(1, ObjectGetCount("doc.txt"));
+        // 2.1.0: a definite 412 means replaced after the read, so read again and delete (the O11 connector's 2.0.0).
+        Assert.Equal(3, _backend.Requests.Count(IsRecordedDelete));
+        Assert.Equal(2, ObjectGetCount("doc.txt"));
+        Assert.Empty(_backend.Objects);
     }
 
     [Fact]
-    public void S2_A_delete_refused_with_408_then_412_reports_the_new_version_without_probing()
+    public void S2_A_delete_refused_with_408_then_412_reads_the_new_generation_and_deletes_it_like_O11()
     {
         Seed("doc.txt", 7);
         _backend.StorageResponseOverride = TwoAnswers(HttpStatusCode.RequestTimeout, HttpStatusCode.PreconditionFailed);
 
-        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt"));
+        _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt");
 
-        Assert.Contains("was replaced while it was being deleted: a newer version now exists", ex.Message);
-        Assert.Equal(2, _backend.Requests.Count(IsRecordedDelete));
-        Assert.Equal(1, ObjectGetCount("doc.txt"));
+        // 2.1.0: a definite 412 means replaced after the read, so read again and delete (the O11 connector's 2.0.0).
+        Assert.Equal(3, _backend.Requests.Count(IsRecordedDelete));
+        Assert.Equal(2, ObjectGetCount("doc.txt"));
+        Assert.Empty(_backend.Objects);
     }
 
     [Fact]
@@ -278,14 +280,14 @@ public sealed class RepeatSemantics202Tests : IDisposable
     }
 
     [Fact]
-    public void S7_A_delete_refused_with_429_then_answered_404_says_the_object_was_not_found()
+    public void S7_A_delete_refused_with_429_then_answered_404_counts_as_deleted_like_O11()
     {
         Seed("doc.txt", 7);
         _backend.StorageResponseOverride = TwoAnswers(HttpStatusCode.TooManyRequests, HttpStatusCode.NotFound);
 
-        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt"));
+        // 2.1.0: the object existed a moment ago (the read found it), so a 404 means it is gone, as asked.
+        _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt");
 
-        Assert.Contains("was not found in bucket", ex.Message);
         Assert.Equal(2, _backend.Requests.Count(IsRecordedDelete));
     }
 
@@ -318,7 +320,7 @@ public sealed class RepeatSemantics202Tests : IDisposable
     }
 
     [Fact]
-    public void S9_A_delete_answered_412_on_the_first_attempt_reports_a_replacement_without_a_second_read()
+    public void S9_A_delete_answered_412_on_every_attempt_gives_up_after_3_with_the_O11_message()
     {
         Seed("doc.txt", 7);
         _backend.StorageResponseOverride = req =>
@@ -326,9 +328,10 @@ public sealed class RepeatSemantics202Tests : IDisposable
 
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt"));
 
-        Assert.Contains("was replaced while it was being deleted: a newer version now exists", ex.Message);
-        Assert.Equal(1, _backend.Requests.Count(IsRecordedDelete));
-        Assert.Equal(1, ObjectGetCount("doc.txt"));
+        Assert.Equal($"The object '{Bucket}/doc.txt' was replaced by other requests on each of 3 attempts to delete it, so it was not deleted. Retry the delete.", ex.Message);
+        Assert.Equal(3, _backend.Requests.Count(IsRecordedDelete));
+        Assert.Equal(3, ObjectGetCount("doc.txt"));
+        Assert.Single(_backend.Objects);
     }
 
     // ---- S10-S13: Object_Move --------------------------------------------------------
@@ -341,8 +344,7 @@ public sealed class RepeatSemantics202Tests : IDisposable
 
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Move(ClientCredentials(), Bucket, "src.txt", Bucket, "dst.txt"));
 
-        Assert.Contains("was modified during the move and was not deleted", ex.Message);
-        Assert.DoesNotContain("generation", ex.Message);
+        Assert.Contains("(generation 7 when the move started) was modified during the move and was not deleted", ex.Message);
         Assert.Equal(2, _backend.Requests.Count(IsRecordedDelete));
         // A 429 is a refusal, so there is nothing to look at: only the read before the copy.
         Assert.Equal(1, ObjectGetCount("src.txt"));
@@ -492,7 +494,7 @@ public sealed class RepeatSemantics202Tests : IDisposable
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_UpdateMetadata(ClientCredentials(), Bucket, "doc.txt", "text/csv", "", "", "", Array.Empty<MetadataEntry>()));
 
         Assert.Contains("may already have been applied", ex.Message);
-        Assert.Contains("whose outcome is unknown", ex.Message);
+        Assert.Contains("when the request was repeated after a network error", ex.Message);
         Assert.Equal(2, patches);
     }
 
