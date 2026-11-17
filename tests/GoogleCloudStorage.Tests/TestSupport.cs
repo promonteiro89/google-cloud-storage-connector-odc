@@ -25,6 +25,8 @@ internal static class TestSupport
     public static Authentication Auth(string? clientEmail = null, string? privateKey = null) => new()
     {
         ProjectId = ProjectId,
+        // Required since 2.1.0: an empty AuthenticationMethod is rejected.
+        AuthenticationMethod = "ServiceAccountKey",
         ClientEmail = clientEmail ?? ClientEmail,
         PrivateKey = privateKey ?? PrivateKeyPem
     };

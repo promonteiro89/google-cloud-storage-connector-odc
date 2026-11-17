@@ -325,7 +325,7 @@ public sealed class ActionHardeningTests : IDisposable
         _backend.StorageResponseOverride = FailFirst(IsSessionPost, HttpStatusCode.ServiceUnavailable);
         var bytes = new byte[] { 1, 2, 3, 4, 5, 6 };
 
-        _sut.Object_UploadBinary(ClientCredentials(), Bucket, "up.bin", new GcsFile { Content = bytes, ContentType = "application/octet-stream" }, []);
+        _sut.Object_UploadBinary(ClientCredentials(), Bucket, "up.bin", new GcsFile { Content = bytes, ContentType = "application/octet-stream" }, [], out _);
 
         Assert.Equal(bytes, _backend.StoredObjects[$"{Bucket}/up.bin"]);
         Assert.Equal(2, _backend.Requests.Count(IsRecordedSessionPost));
@@ -335,9 +335,9 @@ public sealed class ActionHardeningTests : IDisposable
     public void UP2_Upload_rejects_a_content_type_with_line_breaks_before_any_request()
     {
         var ex = Assert.Throws<ArgumentException>(() =>
-            _sut.Object_UploadBinary(ClientCredentials(), Bucket, "up.txt", new GcsFile { Content = [1], ContentType = "text/plain\r\nX-Evil: 1" }, []));
+            _sut.Object_UploadBinary(ClientCredentials(), Bucket, "up.txt", new GcsFile { Content = [1], ContentType = "text/plain\r\nX-Evil: 1" }, [], out _));
 
-        Assert.Contains("ContentType can only contain printable ASCII characters", ex.Message);
+        Assert.Equal("ContentType must not contain line breaks.", ex.Message);
         Assert.Empty(_backend.Requests);
     }
 

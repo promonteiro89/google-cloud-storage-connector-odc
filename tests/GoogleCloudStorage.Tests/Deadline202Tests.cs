@@ -146,7 +146,7 @@ public sealed class Deadline202Tests : IDisposable
         var cases = new (string What, string State, Action<Authentication> Call)[]
         {
             ("Uploading 'up.bin'", UploadState,
-                a => _sut.Object_UploadBinary(a, Bucket, "up.bin", new GcsFile { Content = new byte[] { 1, 2, 3 }, ContentType = "text/plain" }, Array.Empty<MetadataEntry>())),
+                a => _sut.Object_UploadBinary(a, Bucket, "up.bin", new GcsFile { Content = new byte[] { 1, 2, 3 }, ContentType = "text/plain" }, Array.Empty<MetadataEntry>(), out _)),
             ("Downloading 'a.txt'", DownloadState,
                 a => _sut.Object_DownloadBinary(a, Bucket, "a.txt", out _)),
             ($"Listing the objects of bucket '{Bucket}'", TooManyObjects,

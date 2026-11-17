@@ -89,7 +89,7 @@ Every action takes an `Authentication` structure. Two methods are supported, sel
 | **`WorkloadIdentityFederation`** | **Recommended** for workloads outside Google Cloud | **None**, only short-lived tokens | Signed by the service account through the IAM `signBlob` API |
 | **`ServiceAccountKey`** *(default when empty)* | Last resort | A long-lived private key | Signed locally with the key |
 
-Existing apps keep working unchanged: an empty `AuthenticationMethod` means `ServiceAccountKey`. Because the method is just a value, you can drive it from a setting and migrate one environment at a time. Store every credential value in **ODC App Settings**, marking secrets as **Secret**.
+`AuthenticationMethod` is **required** (since 2.1.0): an empty value is rejected with "AuthenticationMethod is required. Set it to 'WorkloadIdentityFederation' or 'ServiceAccountKey'." before any request. Because the method is just a value, you can drive it from a setting and migrate one environment at a time. Store every credential value in **ODC App Settings**, marking secrets as **Secret**.
 
 ### Workload Identity Federation (recommended, keyless)
 
@@ -156,7 +156,7 @@ Then set `WorkloadIdentityProvider` to `//iam.googleapis.com/projects/$PROJECT_N
 
 | Field | Source in the service account JSON key | Description |
 |---|---|---|
-| `AuthenticationMethod` | — | Empty or `ServiceAccountKey` |
+| `AuthenticationMethod` | — | `ServiceAccountKey` (required) |
 | `ProjectId` | `project_id` | Your Google Cloud project ID |
 | `ClientEmail` | `client_email` | Service account email |
 | `PrivateKey` | `private_key` | Full RSA private key (with BEGIN/END headers) |
@@ -174,7 +174,8 @@ Uploads an ODC **File** (from an Upload widget, an entity attribute or another a
 
 - **Time is the limit.** One upload may run for 85 seconds, retries included, within ODC's 95-second action limit; a slower one stops with an error. A request in flight at that moment may still complete at Google, so check with `Object_Exists` before relying on either outcome. Measured on ODC: 200 MB took about 10 s to a bucket in a nearby region and 22 s to one on another continent. Keep the bucket in or near your ODC region, and use `Object_GetSignedUrl` (Operation `Upload`) for files too large to send in that time.
 - **Retries:** transient errors (408, 429, 500, 502, 503, 504, network) are retried. An interrupted chunk is resent, and a failed start reopens the File, up to 3 attempts in total.
-- **Content type:** the content type must be printable ASCII (for example `application/pdf`). One with a line break, another control character or a non-ASCII character is rejected before anything is sent.
+- **Header values:** the content type, content disposition, cache control and content encoding must be printable ASCII (for example `application/pdf`). A line break is rejected with "… must not contain line breaks.", and any other control or non-ASCII character with "… must contain only printable ASCII characters …", before anything is sent.
+- **Create only:** with `onlyIfNotExists`, the upload is sent with Google's `ifGenerationMatch=0`, so an existing object is never replaced. If an attempt stored the object but its answer was lost, the repeat is refused with 412; the connector then reads the object and returns success only when its size, MD5 and creation time (no earlier than this call) show it is the one this call stored.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -185,6 +186,15 @@ Uploads an ODC **File** (from an Upload widget, an entity attribute or another a
 | `file` | `File` | The ODC File to upload |
 | `contentType` | `Text` | Optional MIME type to store. Empty = the File's own MIME type. |
 | `metadata` | `List of MetadataEntry` | Optional custom key-value metadata to store with the object (e.g. tenant, document type). Retrievable via `Object_GetMetadata`. Leave empty for none. |
+| `onlyIfNotExists` | `Boolean` | Optional, default `False` (replace any existing object). `True`: store only if no object with this name exists; otherwise fail with "Object '…' already exists in bucket '…'. OnlyIfNotExists is True, so the existing object was left unchanged." and leave it unchanged. |
+| `contentDisposition` | `Text` | Optional `Content-Disposition` to store (e.g. `attachment; filename="a.pdf"`). Empty = not set. |
+| `cacheControl` | `Text` | Optional `Cache-Control` to store (e.g. `no-store`). Empty = not set. |
+| `contentEncoding` | `Text` | Optional `Content-Encoding` to store (e.g. `gzip` for content that is already gzip-compressed). Empty = not set. |
+
+**Outputs:**
+| Output | Type | Description |
+|--------|------|-------------|
+| `generation` | `Long Integer` | The generation (version number) of the stored object. |
 
 > **Integrity check:** the upload carries a CRC32C checksum of the bytes sent. If the data Google receives doesn't match, the upload fails with an "Upload rejected by Google Cloud Storage … retry the upload" error, nothing is stored, and any existing object with that name is left unchanged.
 
@@ -214,7 +224,7 @@ Uploads content held in memory (`BinaryContent`: Binary Data and a content type)
 
 - **When to use it:** for content your app builds in memory (a generated PDF, a CSV, a REST response). ODC app logic cannot turn Binary Data into a File, so use this action for that content. It is also the one to use on **ODC Self-Hosted**, where the File actions have not been verified. Otherwise prefer `Object_Upload`.
 - **Size limit:** ODC limits an action's input to 5.5 MB. The limit covers the whole request, so content close to it may be refused by ODC before it reaches the connector.
-- **Same behaviour as `Object_Upload`:** the CRC32C integrity check, the retries and the content type check apply.
+- **Same behaviour as `Object_Upload`:** the CRC32C integrity check, the retries, the header checks and `onlyIfNotExists` apply.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -224,6 +234,9 @@ Uploads content held in memory (`BinaryContent`: Binary Data and a content type)
 | `objectName` | `Text` | Full path/filename in the bucket |
 | `content` | `BinaryContent` | The content and its MIME type |
 | `metadata` | `List of MetadataEntry` | Optional custom key-value metadata, as in `Object_Upload` |
+| `onlyIfNotExists`, `contentDisposition`, `cacheControl`, `contentEncoding` | | Optional, as in `Object_Upload` |
+
+**Outputs:** `generation` (Long Integer), as in `Object_Upload`.
 
 #### `Object_DownloadBinary`
 Downloads an object into memory as Binary Data, with its content type.
@@ -382,7 +395,7 @@ Generates a time-limited V4 signed URL for secure, direct-to-browser file access
 | `authentication` | `Authentication` | GCP credentials |
 | `bucketName` | `Text` | Source bucket |
 | `objectName` | `Text` | Full path/filename. Required: an empty name would sign a URL for the whole bucket. |
-| `expirationMinutes` | `Integer` | Link validity duration, `1`–`10080` (a V4 signed URL is valid for at most 7 days). Values outside this range raise a clear error. With `WorkloadIdentityFederation`, Google guarantees a `signBlob` signature for **12 hours** only: a longer URL may stop working earlier when Google rotates its signing keys. Use a service account key if you need longer-lived URLs. |
+| `expirationMinutes` | `Integer` | Link validity duration, `1`–`10080` (a V4 signed URL is valid for at most 7 days). Values outside this range raise a clear error. With `WorkloadIdentityFederation`, Google guarantees a `signBlob` signature for **12 hours** only: a longer URL may stop working earlier when Google rotates its signing keys. With `WorkloadIdentityFederation` the limit is therefore **720** minutes (since 2.1.0): a longer value is rejected before any request. Use a service account key if you need longer-lived URLs. |
 | `operation` | `Text` | Optional. `Download` (GET), `Upload` (PUT), or `Delete` (DELETE). Case-insensitive. Defaults to `Download` when the input is not set; an empty text is rejected ("Invalid Operation ''"). |
 | `contentType` | `Text` | Optional, `Upload` URLs only (ignored for `Download` and `Delete`). The exact `Content-Type` the client will send in the PUT request. It becomes part of the signature, so Google rejects uploads with a different `Content-Type`. Leave empty to allow any. Must be printable ASCII. |
 
@@ -419,7 +432,7 @@ Lists all buckets in the specified project.
 | `buckets` | `List of Bucket` | Collection of project bucket metadata |
 
 #### `Bucket_Create`
-Provisions a new globally unique storage container. The request is repeated on transient errors. If a repeat answers that the bucket already exists right after an attempt whose outcome is unknown, the connector reports success only when it can read the bucket and the bucket was created since the call began. Buckets are created with Google's defaults for access control: turn on uniform bucket-level access and public access prevention in Google Cloud if your organisation requires them.
+Provisions a new globally unique storage container. The request is repeated on transient errors. If a repeat answers that the bucket already exists right after an attempt whose outcome is unknown, the connector reports success only when it can read the bucket and the bucket was created since the call began. Buckets are **secure by default** (since 2.1.0): uniform bucket-level access is on (no per-object ACLs) and public access prevention is **enforced**, so nothing in the bucket can be made public. Turn either off with `allowFineGrainedAcl` or `allowPublicAccess`.
 
 **Arguments:**
 | Argument | Type | Description |
@@ -427,6 +440,9 @@ Provisions a new globally unique storage container. The request is repeated on t
 | `authentication` | `Authentication` | GCP credentials |
 | `bucketName` | `Text` | Globally unique name |
 | `location` | `Text` | Geographic region (e.g., `US`, `EU`, `asia-east1`) |
+| `storageClass` | `Text` | Optional: `STANDARD`, `NEARLINE`, `COLDLINE` or `ARCHIVE` (case-insensitive). Empty = `STANDARD`. Anything else is rejected before any request. |
+| `allowFineGrainedAcl` | `Boolean` | Optional, default `False`: uniform bucket-level access. `True` allows per-object ACLs. |
+| `allowPublicAccess` | `Boolean` | Optional, default `False`: public access prevention enforced. `True` sets it to `inherited`, so public access can be granted. |
 
 #### `Bucket_Delete`
 Decommissioning of an empty storage container. The request is repeated on transient errors; a repeat that finds the bucket gone right after an attempt whose outcome is unknown reports success.
@@ -458,7 +474,7 @@ Checks whether a bucket exists and is accessible to the service account, without
 ### `Authentication`
 Google Cloud credentials for either method (see [Authentication](#authentication)).
 - `ProjectId`: Text (mandatory)
-- `AuthenticationMethod`: Text: `WorkloadIdentityFederation` or `ServiceAccountKey` (empty = `ServiceAccountKey`)
+- `AuthenticationMethod`: Text, required: `WorkloadIdentityFederation` or `ServiceAccountKey`
 - `ClientEmail`, `PrivateKey`: Text (ServiceAccountKey only)
 - `WorkloadIdentityProvider`, `ServiceAccountEmail`, `TokenEndpoint`, `ClientId`, `ClientSecret`, `Scope`, `Audience`, `SubjectToken`: Text (WorkloadIdentityFederation only)
 
@@ -473,6 +489,9 @@ Represents object metadata.
 - `Size`: Long Integer
 - `ContentType`: Text
 - `Updated`: Date Time (UTC)
+- `Generation`: Long Integer (version number)
+- `MD5Hash`: Text (Base64 MD5; empty for composite objects)
+- `Crc32c`: Text (Base64 CRC32C)
 
 ### `Bucket`
 Represents storage container metadata.

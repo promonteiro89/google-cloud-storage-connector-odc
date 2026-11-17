@@ -792,7 +792,7 @@ public sealed class RepeatSemantics202Tests : IDisposable
         var file = _files.Add(new byte[200_000], "application/octet-stream");
 
         var ex = Assert.ThrowsAny<Exception>(() =>
-            _sut.Object_Upload(ClientCredentials(), Bucket, "slow.bin", file, "", Array.Empty<MetadataEntry>()));
+            _sut.Object_Upload(ClientCredentials(), Bucket, "slow.bin", file, "", Array.Empty<MetadataEntry>(), out _));
 
         Assert.Contains("may not have been stored: check with Object_Exists", ex.Message);
         Assert.DoesNotContain("nothing was stored", ex.Message);

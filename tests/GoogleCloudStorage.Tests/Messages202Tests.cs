@@ -181,9 +181,9 @@ public sealed class Messages202Tests : IDisposable
 
         var calls = new (string Label, Action<Authentication> Call)[]
         {
-            ("Object_Upload", a => _sut.Object_Upload(a, bad, "a.txt", new StubFile(), "", Array.Empty<MetadataEntry>())),
+            ("Object_Upload", a => _sut.Object_Upload(a, bad, "a.txt", new StubFile(), "", Array.Empty<MetadataEntry>(), out _)),
             ("Object_Download", a => _sut.Object_Download(a, bad, "a.txt", out _)),
-            ("Object_UploadBinary", a => _sut.Object_UploadBinary(a, bad, "a.txt", content, Array.Empty<MetadataEntry>())),
+            ("Object_UploadBinary", a => _sut.Object_UploadBinary(a, bad, "a.txt", content, Array.Empty<MetadataEntry>(), out _)),
             ("Object_DownloadBinary", a => _sut.Object_DownloadBinary(a, bad, "a.txt", out _)),
             ("Object_List", a => _sut.Object_List(a, bad, "", 0, "", "", out _, out _, out _)),
             ("Object_Exists", a => _sut.Object_Exists(a, bad, "a.txt", out _)),
@@ -307,9 +307,9 @@ public sealed class Messages202Tests : IDisposable
 
         var calls = new (string Label, Action Call)[]
         {
-            ("Object_Upload explicit", () => _sut.Object_Upload(Federated(), "my-bucket", "a.txt", new StubFile(), badType, Array.Empty<MetadataEntry>())),
-            ("Object_Upload file's own", () => _sut.Object_Upload(Federated(), "my-bucket", "a.txt", new StubFile { ContentType = badType }, "", Array.Empty<MetadataEntry>())),
-            ("Object_UploadBinary", () => _sut.Object_UploadBinary(Federated(), "my-bucket", "a.txt", new GcsFile { Content = new byte[] { 1 }, ContentType = badType }, Array.Empty<MetadataEntry>())),
+            ("Object_Upload explicit", () => _sut.Object_Upload(Federated(), "my-bucket", "a.txt", new StubFile(), badType, Array.Empty<MetadataEntry>(), out _)),
+            ("Object_Upload file's own", () => _sut.Object_Upload(Federated(), "my-bucket", "a.txt", new StubFile { ContentType = badType }, "", Array.Empty<MetadataEntry>(), out _)),
+            ("Object_UploadBinary", () => _sut.Object_UploadBinary(Federated(), "my-bucket", "a.txt", new GcsFile { Content = new byte[] { 1 }, ContentType = badType }, Array.Empty<MetadataEntry>(), out _)),
             ("Object_GetSignedUrl Upload", () => _sut.Object_GetSignedUrl(Federated(), "my-bucket", "a.txt", 5, out _, "Upload", badType))
         };
 
@@ -319,7 +319,7 @@ public sealed class Messages202Tests : IDisposable
 
             var ex = Assert.Throws<ArgumentException>(call);
 
-            Assert.True(ex.Message.StartsWith("ContentType can only contain printable ASCII", StringComparison.Ordinal), $"{label}: {ex.Message}");
+            Assert.True(ex.Message.StartsWith("ContentType must ", StringComparison.Ordinal), $"{label}: {ex.Message}");
             Assert.True(_backend.Requests.Count == 0, $"{label} sent {_backend.Requests.Count} request(s)");
         }
     }
@@ -332,9 +332,9 @@ public sealed class Messages202Tests : IDisposable
     public void M16_control_characters_in_a_content_type_are_an_ArgumentException_not_a_FormatException(string contentType)
     {
         var ex = Assert.Throws<ArgumentException>(() =>
-            _sut.Object_UploadBinary(Federated(), "my-bucket", "a.txt", new GcsFile { Content = new byte[] { 1 }, ContentType = contentType }, Array.Empty<MetadataEntry>()));
+            _sut.Object_UploadBinary(Federated(), "my-bucket", "a.txt", new GcsFile { Content = new byte[] { 1 }, ContentType = contentType }, Array.Empty<MetadataEntry>(), out _));
 
-        Assert.StartsWith("ContentType can only contain printable ASCII", ex.Message);
+        Assert.StartsWith(contentType.Contains('\n') ? "ContentType must not contain line breaks." : "ContentType must contain only printable ASCII characters", ex.Message);
         Assert.Empty(_backend.Requests);
     }
 
@@ -349,7 +349,7 @@ public sealed class Messages202Tests : IDisposable
             var bytes = new byte[] { 1, 2, 3 };
 
             var exception = Record.Exception(() =>
-                _sut.Object_UploadBinary(Federated(), "my-bucket", name, new GcsFile { Content = bytes, ContentType = contentTypes[i] }, Array.Empty<MetadataEntry>()));
+                _sut.Object_UploadBinary(Federated(), "my-bucket", name, new GcsFile { Content = bytes, ContentType = contentTypes[i] }, Array.Empty<MetadataEntry>(), out _));
 
             Assert.Null(exception);
             Assert.Equal(bytes, _backend.StoredObjects[$"my-bucket/{name}"]);
@@ -476,7 +476,7 @@ public sealed class Messages202Tests : IDisposable
         {
             ("Object_DownloadBinary", a => _sut.Object_DownloadBinary(a, "my-bucket", name, out _)),
             ("Object_Download", a => _sut.Object_Download(a, "my-bucket", name, out _)),
-            ("Object_UploadBinary", a => _sut.Object_UploadBinary(a, "my-bucket", name, content, Array.Empty<MetadataEntry>())),
+            ("Object_UploadBinary", a => _sut.Object_UploadBinary(a, "my-bucket", name, content, Array.Empty<MetadataEntry>(), out _)),
             ("Object_Exists", a => _sut.Object_Exists(a, "my-bucket", name, out _)),
             ("Object_Delete", a => _sut.Object_Delete(a, "my-bucket", name)),
             ("Object_Copy source", a => _sut.Object_Copy(a, "my-bucket", name, "my-bucket", "dst.txt")),
@@ -496,10 +496,10 @@ public sealed class Messages202Tests : IDisposable
     }
 
     [Theory]
-    [InlineData("text/html\r\nX-Evil: 1", "", "", "", "ContentType can only contain printable ASCII")]
-    [InlineData("", "gzip\nX-Evil: 1", "", "", "ContentEncoding cannot contain line breaks")]
-    [InlineData("", "", "attachment\r\nX-Evil: 1", "", "ContentDisposition cannot contain line breaks")]
-    [InlineData("", "", "", "no-cache\u0000", "CacheControl cannot contain line breaks")]
+    [InlineData("text/html\r\nX-Evil: 1", "", "", "", "ContentType must not contain line breaks")]
+    [InlineData("", "gzip\nX-Evil: 1", "", "", "ContentEncoding must not contain line breaks")]
+    [InlineData("", "", "attachment\r\nX-Evil: 1", "", "ContentDisposition must not contain line breaks")]
+    [InlineData("", "", "", "no-cache\u0000", "CacheControl must contain only printable ASCII characters")]
     public void M26_update_metadata_rejects_header_values_with_control_characters(string contentType, string contentEncoding, string contentDisposition, string cacheControl, string expected)
     {
         var ex = Assert.Throws<ArgumentException>(() =>
@@ -510,15 +510,16 @@ public sealed class Messages202Tests : IDisposable
     }
 
     [Fact]
-    public void M27_update_metadata_still_accepts_a_non_ascii_content_disposition()
+    public void M27_update_metadata_rejects_a_non_ascii_content_disposition_like_O11()
     {
+        // 2.1.0: header values are printable ASCII everywhere, with the O11 connector's messages.
         _backend.Objects["my-bucket/a.txt"] = new FakeFederationBackend.FakeObject(7, 1);
 
-        var outcome = Record.Exception(() =>
+        var ex = Assert.Throws<ArgumentException>(() =>
             _sut.Object_UpdateMetadata(Federated(), "my-bucket", "a.txt", "", "", "attachment; filename=\"relat\u00F3rio.pdf\"", "", Array.Empty<MetadataEntry>()));
 
-        Assert.False(outcome is ArgumentException, outcome?.Message);
-        Assert.Contains(_backend.Requests, r => r.Method == HttpMethod.Patch);
+        Assert.Equal("ContentDisposition must contain only printable ASCII characters (no control characters, accented letters or other non-ASCII characters).", ex.Message);
+        Assert.DoesNotContain(_backend.Requests, r => r.Method == HttpMethod.Patch);
     }
 
     [Fact]

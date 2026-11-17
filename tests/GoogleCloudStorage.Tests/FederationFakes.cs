@@ -62,7 +62,12 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
     public Dictionary<string, byte[]> StoredObjects { get; } = new();
 
     /// <summary>Metadata of one object the fake Storage API serves, as "bucket/name".</summary>
-    public sealed record FakeObject(long Generation, long Metageneration, string ContentType = "text/plain", long Size = 5);
+    public sealed record FakeObject(long Generation, long Metageneration, string ContentType = "text/plain", long Size = 5,
+        string? Md5Hash = null, string? Crc32c = null, DateTime? TimeCreated = null);
+
+    /// <summary>The generation the next completed upload gets.</summary>
+    public long NextGeneration { get; set; } = 1_700_000_000_000_000;
+
 
     /// <summary>Objects served by `GET /storage/v1/b/{bucket}/o/{object}` (and accepted by PUT).</summary>
     public Dictionary<string, FakeObject> Objects { get; } = new();
@@ -352,6 +357,10 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
         byte[]? stored;
         lock (StoredObjects) StoredObjects.TryGetValue(bucket + "/" + name, out stored);
         if (stored != null) resource["crc32c"] = Crc32c.Base64(stored);
+        if (obj.Crc32c != null) resource["crc32c"] = obj.Crc32c;
+        if (obj.Md5Hash != null) resource["md5Hash"] = obj.Md5Hash;
+        else if (stored != null) resource["md5Hash"] = Convert.ToBase64String(System.Security.Cryptography.MD5.HashData(stored));
+        if (obj.TimeCreated is { } created) resource["timeCreated"] = created.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
         return resource;
     }
 
@@ -372,6 +381,15 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
             var bucket = request.RequestUri!.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries)[4];
             using var meta = JsonDocument.Parse(content);
             var name = meta.RootElement.GetProperty("name").GetString()!;
+            // Like Google, ifGenerationMatch=0 ("only if it does not exist") is refused when the name is taken.
+            if (System.Web.HttpUtility.ParseQueryString(request.RequestUri!.Query)["ifGenerationMatch"] == "0")
+            {
+                bool exists;
+                lock (Objects) exists = Objects.ContainsKey($"{bucket}/{name}");
+                lock (StoredObjects) exists |= StoredObjects.ContainsKey($"{bucket}/{name}");
+                if (exists)
+                    return Json(HttpStatusCode.PreconditionFailed, new { error = new { code = 412, message = "At least one of the pre-conditions you specified did not hold." } });
+            }
             var session = Guid.NewGuid().ToString("N");
             lock (_uploadSessions)
             {
@@ -434,8 +452,17 @@ internal sealed class FakeFederationBackend : HttpMessageHandler
             }
         }
 
-        lock (StoredObjects) StoredObjects[$"{target.Bucket}/{target.Name}"] = received;
-        return Json(HttpStatusCode.OK, new { kind = "storage#object", bucket = target.Bucket, name = target.Name, size = received.Length.ToString(), crc32c = calculated });
+        string storedKey = $"{target.Bucket}/{target.Name}";
+        lock (StoredObjects) StoredObjects[storedKey] = received;
+        long generation;
+        string? uploadedType;
+        lock (_uploadSessions) uploadedType = UploadedContentTypes.GetValueOrDefault(storedKey);
+        lock (Objects)
+        {
+            generation = NextGeneration++;
+            Objects[storedKey] = new FakeObject(generation, 1, uploadedType ?? "application/octet-stream", received.Length, TimeCreated: DateTime.UtcNow);
+        }
+        return Json(HttpStatusCode.OK, new { kind = "storage#object", bucket = target.Bucket, name = target.Name, size = received.Length.ToString(), crc32c = calculated, generation = generation.ToString(System.Globalization.CultureInfo.InvariantCulture) });
     }
 
     private static HttpResponseMessage Json(HttpStatusCode status, object payload) =>

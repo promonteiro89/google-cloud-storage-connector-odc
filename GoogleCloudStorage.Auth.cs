@@ -264,12 +264,15 @@ public partial class GoogleCloudStorage
     {
         string method = (a.AuthenticationMethod ?? string.Empty).Trim();
         AuthMethod resolved;
-        if (method.Length == 0 || method.Equals(MethodServiceAccountKey, StringComparison.OrdinalIgnoreCase))
+        // Required since 2.1.0: an empty value no longer means ServiceAccountKey.
+        if (method.Length == 0)
+            throw new ArgumentException($"AuthenticationMethod is required. Set it to '{MethodWorkloadIdentityFederation}' or '{MethodServiceAccountKey}'.");
+        if (method.Equals(MethodServiceAccountKey, StringComparison.OrdinalIgnoreCase))
             resolved = AuthMethod.ServiceAccountKey;
         else if (method.Equals(MethodWorkloadIdentityFederation, StringComparison.OrdinalIgnoreCase))
             resolved = AuthMethod.WorkloadIdentityFederation;
         else
-            throw new ArgumentException($"Invalid AuthenticationMethod '{Clean(a.AuthenticationMethod)}'. Use '{MethodWorkloadIdentityFederation}' or '{MethodServiceAccountKey}' (or leave it empty for {MethodServiceAccountKey}).");
+            throw new ArgumentException($"Invalid AuthenticationMethod '{Clean(a.AuthenticationMethod)}'. Use '{MethodWorkloadIdentityFederation}' or '{MethodServiceAccountKey}'.");
 
         var missing = new List<string>();
         if (resolved == AuthMethod.ServiceAccountKey)

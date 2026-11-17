@@ -23,6 +23,9 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     /// </summary>
     internal const int MaxDownloadBytes = 5_767_168;
 
+    /// <summary>The longest signed URL, in minutes, with Workload Identity Federation (12 hours).</summary>
+    internal const int MaxFederatedSignedUrlMinutes = 720;
+
     /// <summary>
     /// The time one Object_DeleteByPrefix call may spend deleting before it stops and reports its
     /// partial progress (ODC limits an action to 95 seconds). Test seam.
@@ -76,34 +79,45 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     /// <summary>No retry starts after this much time, so retries never push a call past ODC's 95 seconds. Test seam.</summary>
     internal static TimeSpan TransferRetryWindow { get; set; } = TimeSpan.FromSeconds(40);
 
-    public void Object_Upload(Authentication authentication, string bucketName, string objectName, IOSFile file, string contentType, IEnumerable<MetadataEntry> metadata)
+    public void Object_Upload(Authentication authentication, string bucketName, string objectName, IOSFile file, string contentType, IEnumerable<MetadataEntry> metadata, out long generation,
+        bool onlyIfNotExists = false, string contentDisposition = "", string cacheControl = "", string contentEncoding = "")
     {
+        // Assigned first so every path has a value.
+        generation = 0;
         RequireBucket(bucketName, "BucketName");
         RequireObject(objectName, "ObjectName");
         RequireFile(file);
         var type = string.IsNullOrEmpty(contentType) ? file.ContentType : contentType;
         ValidateContentType(type);
+        RequireHeaderValue(contentDisposition, "ContentDisposition");
+        RequireHeaderValue(cacheControl, "CacheControl");
+        RequireHeaderValue(contentEncoding, "ContentEncoding");
 
         var storageClient = GetStorageClient(authentication);
         var fileStorage = FileStorage.GetInstance();
         using var deadline = new CancellationTokenSource(FileTransferDeadline);
+        var startedUtc = DateTime.UtcNow;
+        bool resent = false;
         try
         {
-            var gcsObject = new Google.Apis.Storage.v1.Data.Object
-            {
-                Bucket = bucketName,
-                Name = objectName,
-                ContentType = string.IsNullOrEmpty(type) ? null : type,
-                Metadata = ToMetadataDictionary(metadata)
-            };
-            var options = new UploadObjectOptions { ChunkSize = UploadChunkSize };
+            var gcsObject = NewUploadObject(bucketName, objectName, type, metadata, contentDisposition, cacheControl, contentEncoding);
+            var options = new UploadObjectOptions { ChunkSize = UploadChunkSize, IfGenerationMatch = onlyIfNotExists ? 0 : null };
 
             // Streams from ODC storage to Google, one chunk in memory at a time. Each attempt reopens the File.
-            WithTransferRetry(() =>
+            var stored = WithTransferRetry(() =>
             {
                 using var source = fileStorage.ReadFileAsStreamAsync(file, deadline.Token).GetAwaiter().GetResult();
                 return storageClient.UploadObjectAsync(gcsObject, source, options, deadline.Token).GetAwaiter().GetResult();
-            });
+            }, () => resent = true);
+            generation = stored.Generation ?? 0;
+        }
+        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.PreconditionFailed && onlyIfNotExists)
+        {
+            var ours = resent
+                ? ObjectStoredByThisCall(storageClient, bucketName, objectName, file.Size, () => Md5Base64(fileStorage, file, deadline.Token), startedUtc, deadline.Token)
+                : null;
+            if (ours == null) throw AlreadyExists(bucketName, objectName, e);
+            generation = ours.Generation ?? 0;
         }
         catch (OperationCanceledException e) when (deadline.IsCancellationRequested)
         {
@@ -178,31 +192,42 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, bucketName, objectName); }
     }
 
-    public void Object_UploadBinary(Authentication authentication, string bucketName, string objectName, BinaryContent content, IEnumerable<MetadataEntry> metadata)
+    public void Object_UploadBinary(Authentication authentication, string bucketName, string objectName, BinaryContent content, IEnumerable<MetadataEntry> metadata, out long generation,
+        bool onlyIfNotExists = false, string contentDisposition = "", string cacheControl = "", string contentEncoding = "")
     {
+        generation = 0;
         RequireBucket(bucketName, "BucketName");
         RequireObject(objectName, "ObjectName");
         ValidateContentType(content.ContentType);
+        RequireHeaderValue(contentDisposition, "ContentDisposition");
+        RequireHeaderValue(cacheControl, "CacheControl");
+        RequireHeaderValue(contentEncoding, "ContentEncoding");
 
         var storageClient = GetStorageClient(authentication);
         using var deadline = new CancellationTokenSource(ActionDeadline);
+        var bytes = content.Content ?? Array.Empty<byte>();
+        var startedUtc = DateTime.UtcNow;
+        bool resent = false;
         try
         {
-            var gcsObject = new Google.Apis.Storage.v1.Data.Object
-            {
-                Bucket = bucketName,
-                Name = objectName,
-                ContentType = string.IsNullOrEmpty(content.ContentType) ? null : content.ContentType,
-                Metadata = ToMetadataDictionary(metadata)
-            };
+            var gcsObject = NewUploadObject(bucketName, objectName, content.ContentType, metadata, contentDisposition, cacheControl, contentEncoding);
+            var options = onlyIfNotExists ? new UploadObjectOptions { IfGenerationMatch = 0 } : null;
 
             // Opening the resumable session is not retried by the SDK; each attempt re-reads the same bytes.
-            var bytes = content.Content ?? Array.Empty<byte>();
-            WithTransferRetry(() =>
+            var stored = WithTransferRetry(() =>
             {
                 using var stream = new MemoryStream(bytes);
-                return storageClient.UploadObjectAsync(gcsObject, stream, null, deadline.Token).GetAwaiter().GetResult();
-            });
+                return storageClient.UploadObjectAsync(gcsObject, stream, options, deadline.Token).GetAwaiter().GetResult();
+            }, () => resent = true);
+            generation = stored.Generation ?? 0;
+        }
+        catch (Google.GoogleApiException e) when (e.HttpStatusCode == HttpStatusCode.PreconditionFailed && onlyIfNotExists)
+        {
+            var ours = resent
+                ? ObjectStoredByThisCall(storageClient, bucketName, objectName, bytes.Length, () => Md5Base64(bytes), startedUtc, deadline.Token)
+                : null;
+            if (ours == null) throw AlreadyExists(bucketName, objectName, e);
+            generation = ours.Generation ?? 0;
         }
         catch (OperationCanceledException e) when (deadline.IsCancellationRequested)
         {
@@ -287,7 +312,10 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
                             Name = obj.Name ?? "",
                             Size = (long)Math.Min(obj.Size ?? 0, long.MaxValue),
                             ContentType = obj.ContentType ?? "",
-                            Updated = ParseTimestamp(obj.UpdatedRaw)
+                            Updated = ParseTimestamp(obj.UpdatedRaw),
+                            Generation = obj.Generation ?? 0,
+                            MD5Hash = obj.Md5Hash ?? "",
+                            Crc32c = obj.Crc32c ?? ""
                         });
                     }
                 }
@@ -788,6 +816,10 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
             _ => throw new ArgumentException($"Invalid Operation '{Clean(operation)}'. Use 'Download', 'Upload', or 'Delete'.")
         };
 
+        // Federation signs with a key Google rotates, so it guarantees a signature for 12 hours only.
+        if (expirationMinutes > MaxFederatedSignedUrlMinutes && ResolveAuthMethod(authentication) == AuthMethod.WorkloadIdentityFederation)
+            throw new ArgumentException($"ExpirationMinutes cannot exceed {MaxFederatedSignedUrlMinutes} minutes (12 hours) with Workload Identity Federation: Google signs these URLs with a key it rotates, so a longer-lived URL could stop working before it expires (received {expirationMinutes}).");
+
         var urlSigner = GetUrlSigner(authentication);
         using var deadline = new CancellationTokenSource(ActionDeadline);
 
@@ -861,10 +893,11 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
         catch (Exception e) when (IsTranslatable(e)) { throw TranslateException(e, authentication, null, null); }
     }
 
-    public void Bucket_Create(Authentication authentication, string bucketName, string location)
+    public void Bucket_Create(Authentication authentication, string bucketName, string location, string storageClass = "", bool allowFineGrainedAcl = false, bool allowPublicAccess = false)
     {
         Require(authentication.ProjectId, "ProjectId");
         RequireBucket(bucketName, "BucketName");
+        string? normalizedClass = ToStorageClass(storageClass);
 
         var storageClient = GetStorageClient(authentication);
         using var deadline = new CancellationTokenSource(ActionDeadline);
@@ -877,7 +910,15 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
                 new Google.Apis.Storage.v1.Data.Bucket
                 {
                     Name = bucketName,
-                    Location = string.IsNullOrWhiteSpace(location) ? null : location.Trim()
+                    Location = string.IsNullOrWhiteSpace(location) ? null : location.Trim(),
+                    StorageClass = normalizedClass,
+                    // Secure by default: uniform access (no per-object ACLs) and public access prevention
+                    // enforced. Both can be turned off by the caller. Same defaults as the O11 connector.
+                    IamConfiguration = new Google.Apis.Storage.v1.Data.Bucket.IamConfigurationData
+                    {
+                        UniformBucketLevelAccess = new Google.Apis.Storage.v1.Data.Bucket.IamConfigurationData.UniformBucketLevelAccessData { Enabled = !allowFineGrainedAcl },
+                        PublicAccessPrevention = allowPublicAccess ? "inherited" : "enforced"
+                    }
                 }, new CreateBucketOptions { RetryOptions = RetryOptions.Never }, deadline.Token).GetAwaiter().GetResult());
         }
         catch (OperationCanceledException e) when (deadline.IsCancellationRequested)
@@ -1000,11 +1041,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     /// A header value stored with an object (content encoding, content disposition, cache control) can
     /// never hold a control character: a line break in it would become a second header when the object is served.
     /// </summary>
-    private static void RejectControlCharacters(string? value, string name)
-    {
-        if (value != null && value.Any(c => c < ' ' || c == '\u007F'))
-            throw new ArgumentException($"{name} cannot contain line breaks or other control characters.");
-    }
+    private static void RejectControlCharacters(string? value, string name) => RequireHeaderValue(value, name);
 
     /// <summary>
     /// Makes caller input and Google's error text safe to put in an error message: control characters
@@ -1086,14 +1123,82 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     }
 
     /// <summary>
+    /// Validates StorageClass before any request. Empty means "not sent" (Google's default, STANDARD);
+    /// otherwise it is upper-cased so 'nearline' works like 'NEARLINE'.
+    /// </summary>
+    private static string? ToStorageClass(string? value)
+    {
+        var trimmed = (value ?? "").Trim();
+        if (trimmed.Length == 0) return null;
+        var upper = trimmed.ToUpperInvariant();
+        if (upper is "STANDARD" or "NEARLINE" or "COLDLINE" or "ARCHIVE") return upper;
+        throw new ArgumentException($"Invalid StorageClass '{Clean(value)}'. Use STANDARD, NEARLINE, COLDLINE or ARCHIVE, or leave it empty for STANDARD.");
+    }
+
+    /// <summary>The object sent by both upload actions. Empty header values are not sent.</summary>
+    private static Google.Apis.Storage.v1.Data.Object NewUploadObject(string bucketName, string objectName, string? contentType, IEnumerable<MetadataEntry> metadata,
+        string? contentDisposition, string? cacheControl, string? contentEncoding) => new()
+    {
+        Bucket = bucketName,
+        Name = objectName,
+        ContentType = string.IsNullOrEmpty(contentType) ? null : contentType,
+        ContentDisposition = string.IsNullOrEmpty(contentDisposition) ? null : contentDisposition,
+        CacheControl = string.IsNullOrEmpty(cacheControl) ? null : cacheControl,
+        ContentEncoding = string.IsNullOrEmpty(contentEncoding) ? null : contentEncoding,
+        Metadata = ToMetadataDictionary(metadata)
+    };
+
+    private static Exception AlreadyExists(string bucketName, string objectName, Exception inner) =>
+        new($"Object '{Clean(objectName)}' already exists in bucket '{Clean(bucketName)}'. OnlyIfNotExists is True, so the existing object was left unchanged.", inner);
+
+    /// <summary>
+    /// After a repeated OnlyIfNotExists upload is answered 412: the object now in the bucket, when it is the
+    /// one this call stored, else null. If a send stored the object and its response was lost, the repeat
+    /// finds the name taken and is refused with 412 - the same answer someone else's object gives - so this
+    /// read decides which it is. All three must match: the size, the MD5 (Google reports the Base64 MD5),
+    /// and a creation time no earlier than this call (Google's clock can be up to a minute behind). Any
+    /// failure of the read counts as "not ours". Same rule as the O11 connector.
+    /// </summary>
+    private static Google.Apis.Storage.v1.Data.Object? ObjectStoredByThisCall(StorageClient client, string bucketName, string objectName, long size, Func<string> md5Base64, DateTime startedUtc, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var existing = WithNetworkRetry(() => client.GetObjectAsync(bucketName, objectName, null, cancellationToken).GetAwaiter().GetResult());
+            if (existing.Size != (ulong)size) return null;
+            if (!string.Equals(existing.Md5Hash, md5Base64(), StringComparison.Ordinal)) return null;
+            return ParseTimestamp(existing.TimeCreatedRaw) >= startedUtc.AddMinutes(-1) ? existing : null;
+        }
+        catch (Exception e) when (IsTranslatable(e) || e is FileStorageException) { return null; }
+    }
+
+    /// <summary>The Base64 MD5 of the bytes: the form Google reports in an object's md5Hash.</summary>
+    private static string Md5Base64(byte[] content) => Convert.ToBase64String(System.Security.Cryptography.MD5.HashData(content));
+
+    /// <summary>The Base64 MD5 of an ODC File, read as a stream (only needed in the rare lost-response case).</summary>
+    private static string Md5Base64(IFileStorage fileStorage, IOSFile file, CancellationToken cancellationToken)
+    {
+        using var source = fileStorage.ReadFileAsStreamAsync(file, cancellationToken).GetAwaiter().GetResult();
+        return Convert.ToBase64String(System.Security.Cryptography.MD5.HashData(source));
+    }
+
+    /// <summary>
     /// A content type travels in an HTTP header, which takes printable ASCII only. A line break would
     /// inject extra headers (or extra signed lines in a signed URL); any other control or non-ASCII
     /// character makes .NET refuse the request, which used to be retried and reported as a network error.
     /// </summary>
-    private static void ValidateContentType(string? contentType)
+    private static void ValidateContentType(string? contentType) => RequireHeaderValue(contentType, "ContentType");
+
+    /// <summary>
+    /// A value that travels in an HTTP header (ContentType, ContentDisposition, CacheControl,
+    /// ContentEncoding) must be printable ASCII. Same messages as the O11 connector. Empty is allowed.
+    /// </summary>
+    private static void RequireHeaderValue(string? value, string name)
     {
-        if (contentType != null && contentType.Any(c => c < ' ' || c > '~'))
-            throw new ArgumentException("ContentType can only contain printable ASCII characters (for example 'application/pdf'); it contains a line break, a control character or a non-ASCII character.");
+        if (string.IsNullOrEmpty(value)) return;
+        if (value.IndexOf('\r') >= 0 || value.IndexOf('\n') >= 0)
+            throw new ArgumentException($"{name} must not contain line breaks.");
+        if (value.Any(ch => ch < ' ' || ch > '~'))
+            throw new ArgumentException($"{name} must contain only printable ASCII characters (no control characters, accented letters or other non-ASCII characters).");
     }
 
     /// <summary>
@@ -1137,7 +1242,7 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
     /// download, a cancellation or timeout (a retry would pass ODC's 95-second limit), or any other 4xx,
     /// and stops retrying once <see cref="TransferRetryWindow"/> has passed.
     /// </summary>
-    private static T WithTransferRetry<T>(Func<T> attempt)
+    private static T WithTransferRetry<T>(Func<T> attempt, Action? beforeRetry = null)
     {
         var delays = TransferRetryDelays;
         var stopwatch = Stopwatch.StartNew();
@@ -1149,6 +1254,8 @@ public partial class GoogleCloudStorage : IGoogleCloudStorage
             }
             catch (Exception e) when (tried < delays.Length && stopwatch.Elapsed < TransferRetryWindow && IsRetryableTransferFailure(e))
             {
+                // Set only when a repeat really follows (not in a finally), so a 412 can be judged correctly.
+                beforeRetry?.Invoke();
                 Thread.Sleep(delays[tried]);
             }
         }

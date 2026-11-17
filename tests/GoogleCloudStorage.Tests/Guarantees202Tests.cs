@@ -451,7 +451,7 @@ public sealed class Guarantees202Tests : IDisposable
     public void G19_UploadBinary_of_no_bytes_stores_an_empty_object()
     {
         _sut.Object_UploadBinary(Federated(), Bucket, "empty.txt",
-            new BinaryContent { Content = Array.Empty<byte>(), ContentType = "text/plain" }, Array.Empty<MetadataEntry>());
+            new BinaryContent { Content = Array.Empty<byte>(), ContentType = "text/plain" }, Array.Empty<MetadataEntry>(), out _);
 
         Assert.True(_backend.StoredObjects.TryGetValue($"{Bucket}/empty.txt", out var stored));
         Assert.Empty(stored!);
@@ -463,7 +463,7 @@ public sealed class Guarantees202Tests : IDisposable
     {
         var file = _files.Add(Array.Empty<byte>(), "text/plain");
 
-        _sut.Object_Upload(Federated(), Bucket, "empty.txt", file, "", Array.Empty<MetadataEntry>());
+        _sut.Object_Upload(Federated(), Bucket, "empty.txt", file, "", Array.Empty<MetadataEntry>(), out _);
 
         Assert.True(_backend.StoredObjects.TryGetValue($"{Bucket}/empty.txt", out var stored));
         Assert.Empty(stored!);

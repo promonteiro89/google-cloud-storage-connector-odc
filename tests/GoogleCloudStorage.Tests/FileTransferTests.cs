@@ -77,7 +77,7 @@ public sealed class FileTransferTests : IDisposable
         var data = Bytes(3 * 1024 * 1024 + 500);
         var file = _files.Add(data, "application/pdf");
 
-        _sut.Object_Upload(Federated(), "my-bucket", "docs/report.pdf", file, "", Array.Empty<MetadataEntry>());
+        _sut.Object_Upload(Federated(), "my-bucket", "docs/report.pdf", file, "", Array.Empty<MetadataEntry>(), out _);
 
         Assert.Equal(data, _backend.StoredObjects["my-bucket/docs/report.pdf"]);
         Assert.Equal(4, _backend.UploadChunkCounts["my-bucket/docs/report.pdf"]);
@@ -89,7 +89,7 @@ public sealed class FileTransferTests : IDisposable
     {
         var file = _files.Add(Bytes(1000), "application/octet-stream");
 
-        _sut.Object_Upload(Federated(), "my-bucket", "a.csv", file, "text/csv", Array.Empty<MetadataEntry>());
+        _sut.Object_Upload(Federated(), "my-bucket", "a.csv", file, "text/csv", Array.Empty<MetadataEntry>(), out _);
 
         Assert.Equal("text/csv", _backend.UploadedContentTypes["my-bucket/a.csv"]);
     }
@@ -98,9 +98,9 @@ public sealed class FileTransferTests : IDisposable
     public void Upload_of_an_empty_file_reference_is_refused_before_any_request()
     {
         var nullFile = Assert.Throws<ArgumentException>(() =>
-            _sut.Object_Upload(Federated(), "my-bucket", "a.bin", null!, "", Array.Empty<MetadataEntry>()));
+            _sut.Object_Upload(Federated(), "my-bucket", "a.bin", null!, "", Array.Empty<MetadataEntry>(), out _));
         var noKey = Assert.Throws<ArgumentException>(() =>
-            _sut.Object_Upload(Federated(), "my-bucket", "a.bin", new FakeFile { Key = "", ContentType = "x/y" }, "", Array.Empty<MetadataEntry>()));
+            _sut.Object_Upload(Federated(), "my-bucket", "a.bin", new FakeFile { Key = "", ContentType = "x/y" }, "", Array.Empty<MetadataEntry>(), out _));
 
         Assert.Contains("File cannot be empty", nullFile.Message);
         Assert.Contains("File cannot be empty", noKey.Message);
@@ -113,9 +113,9 @@ public sealed class FileTransferTests : IDisposable
         var file = _files.Add(Bytes(10), "text/plain");
 
         var ex = Assert.Throws<ArgumentException>(() =>
-            _sut.Object_Upload(Federated(), "my-bucket", "a.txt", file, "text/plain\r\nX-Evil: 1", Array.Empty<MetadataEntry>()));
+            _sut.Object_Upload(Federated(), "my-bucket", "a.txt", file, "text/plain\r\nX-Evil: 1", Array.Empty<MetadataEntry>(), out _));
 
-        Assert.Contains("ContentType can only contain printable ASCII characters", ex.Message);
+        Assert.Equal("ContentType must not contain line breaks.", ex.Message);
         Assert.Empty(_backend.Requests);
     }
 
@@ -127,7 +127,7 @@ public sealed class FileTransferTests : IDisposable
         var file = _files.Add(data, "application/octet-stream");
         _backend.FailUploadPuts = (HttpStatusCode.ServiceUnavailable, 1);
 
-        _sut.Object_Upload(Federated(), "my-bucket", "resume.bin", file, "", Array.Empty<MetadataEntry>());
+        _sut.Object_Upload(Federated(), "my-bucket", "resume.bin", file, "", Array.Empty<MetadataEntry>(), out _);
 
         Assert.Equal(data, _backend.StoredObjects["my-bucket/resume.bin"]);
     }
@@ -139,7 +139,7 @@ public sealed class FileTransferTests : IDisposable
         var file = _files.Add(data, "application/octet-stream");
         _backend.FailUploadStarts = (HttpStatusCode.ServiceUnavailable, 1);
 
-        _sut.Object_Upload(Federated(), "my-bucket", "retry.bin", file, "", Array.Empty<MetadataEntry>());
+        _sut.Object_Upload(Federated(), "my-bucket", "retry.bin", file, "", Array.Empty<MetadataEntry>(), out _);
 
         Assert.Equal(data, _backend.StoredObjects["my-bucket/retry.bin"]);
         Assert.Equal(2, _files.Opens);
@@ -153,7 +153,7 @@ public sealed class FileTransferTests : IDisposable
         _files.ReadDelay = TimeSpan.FromMilliseconds(100);
 
         var ex = Assert.ThrowsAny<Exception>(() =>
-            _sut.Object_Upload(Federated(), "my-bucket", "slow.bin", file, "", Array.Empty<MetadataEntry>()));
+            _sut.Object_Upload(Federated(), "my-bucket", "slow.bin", file, "", Array.Empty<MetadataEntry>(), out _));
 
         Assert.Contains("did not finish within", ex.Message);
         Assert.Contains("may not have been stored: check with Object_Exists", ex.Message);
@@ -168,7 +168,7 @@ public sealed class FileTransferTests : IDisposable
         _files.ReadFailure = new ExpiredFileException("The file has expired.");
 
         var ex = Assert.ThrowsAny<Exception>(() =>
-            _sut.Object_Upload(Federated(), "my-bucket", "a.txt", file, "", Array.Empty<MetadataEntry>()));
+            _sut.Object_Upload(Federated(), "my-bucket", "a.txt", file, "", Array.Empty<MetadataEntry>(), out _));
 
         Assert.Contains("ODC file storage failed", ex.Message);
         Assert.Contains("The file has expired.", ex.Message);
