@@ -4,7 +4,7 @@ All notable changes to the **Google Cloud Storage Connector for ODC** are docume
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.1.0] - Unreleased
+## [2.1.0] - 2026-11-19
 
 Parity with the O11 connector's 2.0.0: secure bucket defaults, create-only uploads with content headers, and a required `AuthenticationMethod`. **Breaking:** see **Migrating from 2.0.x**. It also contains all of 2.0.2 below, which was never released on its own.
 
