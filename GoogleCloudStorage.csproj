@@ -7,6 +7,7 @@
     <RootNamespace>OutSystems.ExternalLibraries.GoogleCloudStorage_Connector</RootNamespace>
     <AssemblyName>OutSystems.ExternalLibraries.GoogleCloudStorage_Connector</AssemblyName>
     <Version>2.1.0</Version>
+    <Description>Google Cloud Storage connector for OutSystems Developer Cloud.</Description>
     <!-- The test project lives under tests/; keep its sources out of the connector assembly. -->
     <DefaultItemExcludes>$(DefaultItemExcludes);tests/**</DefaultItemExcludes>
   </PropertyGroup>
