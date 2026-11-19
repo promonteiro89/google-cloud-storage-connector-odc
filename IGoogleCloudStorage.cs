@@ -12,8 +12,13 @@ public interface IGoogleCloudStorage
         [OSParameter(Description = "Bucket Name")] string bucketName,
         [OSParameter(Description = "Object Name")] string objectName,
         [OSParameter(Description = "The File to upload (for example from an Upload widget or an entity attribute)")] IOSFile file,
-        [OSParameter(Description = "Optional MIME type to store (e.g. application/pdf). Empty = the File's own MIME type.")] string contentType,
-        [OSParameter(Description = "Optional custom key-value metadata to store with the object (e.g. user id, tenant, document type). Retrievable via Object_GetMetadata. Leave empty for none.")] IEnumerable<MetadataEntry> metadata);
+        [OSParameter(Description = "Optional MIME type to store (e.g. application/pdf), printable ASCII only. Empty = the File's own MIME type.")] string contentType,
+        [OSParameter(Description = "Optional custom key-value metadata to store with the object (e.g. user id, tenant, document type). Retrievable via Object_GetMetadata. Leave empty for none.")] IEnumerable<MetadataEntry> metadata,
+        [OSParameter(Description = "The generation (version number) of the stored object.")] out long generation,
+        [OSParameter(Description = "True: store only if no object with this name exists yet (otherwise fail and leave it unchanged). False (default): replace any existing object.")] bool onlyIfNotExists = false,
+        [OSParameter(Description = "Optional Content-Disposition to store (e.g. attachment; filename=\"a.pdf\"), printable ASCII only. Empty = not set.")] string contentDisposition = "",
+        [OSParameter(Description = "Optional Cache-Control to store (e.g. no-store), printable ASCII only. Empty = not set.")] string cacheControl = "",
+        [OSParameter(Description = "Optional Content-Encoding to store (e.g. gzip, when the content is already gzip-compressed), printable ASCII only. Empty = not set.")] string contentEncoding = "");
 
     [OSAction(Description = "Downloads an object into a new ODC File, streaming it into ODC storage (up to 2 GB, ODC's File limit). The File is temporary: save it to an entity attribute to keep it. The download must finish within the action's 85-second deadline.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_Download(
@@ -22,13 +27,18 @@ public interface IGoogleCloudStorage
         [OSParameter(Description = "Object Name")] string objectName,
         [OSParameter(Description = "The downloaded File, named after the last part of the object name")] out IOSFile file);
 
-    [OSAction(Description = "Uploads content held in memory (Binary Data, at most 5.5 MB, ODC's action input limit) to a bucket, optionally with custom key-value metadata. Use it for content your app builds in memory, or on ODC Self-Hosted, which has no File type; otherwise prefer Object_Upload.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    [OSAction(Description = "Uploads content held in memory (Binary Data, at most 5.5 MB, ODC's action input limit) to a bucket, optionally with custom key-value metadata. Use it for content your app builds in memory; otherwise prefer Object_Upload.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_UploadBinary(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "Bucket Name")] string bucketName,
         [OSParameter(Description = "Object Name")] string objectName,
         [OSParameter(Description = "The content and its MIME type")] BinaryContent content,
-        [OSParameter(Description = "Optional custom key-value metadata to store with the object (e.g. user id, tenant, document type). Retrievable via Object_GetMetadata. Leave empty for none.")] IEnumerable<MetadataEntry> metadata);
+        [OSParameter(Description = "Optional custom key-value metadata to store with the object (e.g. user id, tenant, document type). Retrievable via Object_GetMetadata. Leave empty for none.")] IEnumerable<MetadataEntry> metadata,
+        [OSParameter(Description = "The generation (version number) of the stored object.")] out long generation,
+        [OSParameter(Description = "True: store only if no object with this name exists yet (otherwise fail and leave it unchanged). False (default): replace any existing object.")] bool onlyIfNotExists = false,
+        [OSParameter(Description = "Optional Content-Disposition to store (e.g. attachment; filename=\"a.pdf\"), printable ASCII only. Empty = not set.")] string contentDisposition = "",
+        [OSParameter(Description = "Optional Cache-Control to store (e.g. no-store), printable ASCII only. Empty = not set.")] string cacheControl = "",
+        [OSParameter(Description = "Optional Content-Encoding to store (e.g. gzip, when the content is already gzip-compressed), printable ASCII only. Empty = not set.")] string contentEncoding = "");
 
     [OSAction(Description = "Downloads an object into memory as Binary Data. Objects larger than 5.5 MB (the ODC action payload limit) are refused: use Object_Download, or Object_GetSignedUrl to let the client download them directly from Google.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_DownloadBinary(
@@ -87,7 +97,7 @@ public interface IGoogleCloudStorage
         [OSParameter(Description = "The bucket to move the object into (can be the same as the source)")] string destinationBucketName,
         [OSParameter(Description = "The full path/name for the destination object")] string destinationObjectName);
 
-    [OSAction(Description = "Updates an object's metadata without re-uploading its content. Only the provided fields change: empty text inputs leave the corresponding field untouched, and an empty Metadata list leaves custom metadata untouched. Within Metadata, an entry with an empty Value removes that key. Fails cleanly, changing nothing, if another request changes or replaces the object meanwhile.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    [OSAction(Description = "Updates an object's metadata without re-uploading its content. Only the provided fields change: empty text inputs leave the corresponding field untouched, and an empty Metadata list leaves custom metadata untouched. Within Metadata, an entry with an empty Value removes that key. Fails if another request changes or replaces the object meanwhile; the error says whether the update may already have been applied.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Object_UpdateMetadata(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "Bucket Name")] string bucketName,
@@ -110,30 +120,33 @@ public interface IGoogleCloudStorage
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "Bucket Name")] string bucketName,
         [OSParameter(Description = "Object Name. Required: an empty name would sign a URL for the whole bucket.")] string objectName,
-        [OSParameter(Description = "Expiration time in minutes (1 to 10080; a Google Cloud V4 signed URL is valid for at most 7 days). With WorkloadIdentityFederation, Google guarantees the signature for 12 hours only; use a service account key for longer-lived URLs.")] int expirationMinutes,
+        [OSParameter(Description = "Expiration time in minutes (1 to 10080; a Google Cloud V4 signed URL is valid for at most 7 days). With WorkloadIdentityFederation at most 720 (12 hours): Google signs those URLs with a key it rotates; use a service account key for longer-lived URLs.")] int expirationMinutes,
         [OSParameter(Description = "The temporary secure URL")] out string url,
-        [OSParameter(Description = "The operation the URL will permit: 'Download' (GET), 'Upload' (PUT), or 'Delete' (DELETE). Defaults to 'Download'.")] string operation = "Download",
-        [OSParameter(Description = "Optional, Upload URLs only (ignored for Download and Delete): the exact Content-Type the client will send in the PUT request. It becomes part of the signature, so Google rejects uploads with a different Content-Type. Leave empty to allow any. Line breaks are rejected.")] string contentType = "");
+        [OSParameter(Description = "The operation the URL will permit: 'Download' (GET), 'Upload' (PUT), or 'Delete' (DELETE). Defaults to 'Download' when not set; an empty value is an error.")] string operation = "Download",
+        [OSParameter(Description = "Optional, Upload URLs only (ignored for Download and Delete): the exact Content-Type the client will send in the PUT request. It becomes part of the signature, so Google rejects uploads with a different Content-Type. Leave empty to allow any. Must be printable ASCII.")] string contentType = "");
 
     [OSAction(Description = "Lists all buckets in the specified project.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Bucket_List(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "List of GCS buckets")] out IEnumerable<Bucket> buckets);
 
-    [OSAction(Description = "Creates a new bucket in the specified project.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    [OSAction(Description = "Creates a new bucket in the specified project. Secure by default: uniform bucket-level access on and public access prevention enforced, unless AllowFineGrainedAcl or AllowPublicAccess is True.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Bucket_Create(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "Bucket Name")] string bucketName,
-        [OSParameter(Description = "Geographic location (e.g., US, EU). Empty uses Google's default.")] string location);
+        [OSParameter(Description = "Geographic location (e.g., US, EU). Empty uses Google's default.")] string location,
+        [OSParameter(Description = "Optional storage class: STANDARD, NEARLINE, COLDLINE or ARCHIVE (case-insensitive). Empty = STANDARD.")] string storageClass = "",
+        [OSParameter(Description = "False (default): uniform bucket-level access, no per-object ACLs (recommended). True: allow fine-grained per-object ACLs.")] bool allowFineGrainedAcl = false,
+        [OSParameter(Description = "False (default): public access prevention enforced, so nothing in the bucket can be made public. True: allow public access to be granted.")] bool allowPublicAccess = false);
 
     [OSAction(Description = "Deletes a bucket. The bucket must be empty.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Bucket_Delete(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "Bucket Name")] string bucketName);
 
-    [OSAction(Description = "Checks whether a bucket exists and is accessible to the service account, without listing its contents.", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
+    [OSAction(Description = "Checks whether a bucket exists, without listing its contents. Returns False when it does not exist; fails with an access-denied error when the service account may not read buckets (Storage Object Admin does not include that permission).", ReturnDescription = "No return value", IconResourceName = "OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Resources.action_icon.png")]
     void Bucket_Exists(
         [OSParameter(Description = "Authentication credentials")] Authentication authentication,
         [OSParameter(Description = "Bucket Name")] string bucketName,
-        [OSParameter(Description = "True if the bucket exists and the service account can access it")] out bool exists);
+        [OSParameter(Description = "True if the bucket exists")] out bool exists);
 }

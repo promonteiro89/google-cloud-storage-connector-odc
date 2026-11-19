@@ -15,7 +15,7 @@ namespace GoogleCloudStorage.Tests;
 /// <summary>
 /// Offline tests of the v1.7.2 authentication hardening: token endpoint messages that never echo a
 /// secret, sanitized identity provider errors, the 1 MB response bound, the cache cap on insert,
-/// the 80-second timeout of the credentials' own HTTP clients, and ClientEmail trimming.
+/// the 90-second timeout of the credentials' own HTTP clients, and ClientEmail trimming.
 /// </summary>
 public sealed class AuthHardeningTests : IDisposable
 {
@@ -222,7 +222,7 @@ public sealed class AuthHardeningTests : IDisposable
         Connector.HttpClientFactoryOverride = null;
         // A unique email so the process-wide credential cache cannot hand back one built with a fake factory.
         var credential = (Google.Apis.Auth.OAuth2.ServiceAccountCredential)Invoke("GetServiceAccountCredential", UniqueKeyAuth());
-        Assert.Equal(TimeSpan.FromSeconds(80), credential.HttpClient.Timeout);
+        Assert.Equal(TimeSpan.FromSeconds(90), credential.HttpClient.Timeout);
     }
 
     [Fact]
@@ -236,9 +236,9 @@ public sealed class AuthHardeningTests : IDisposable
         // GoogleCredential.UnderlyingCredential (ImpersonatedCredential) -> .HttpClient, and
         // ImpersonatedCredential.SourceCredential (the external account credential) -> .HttpClient.
         var impersonated = Assert.IsType<ImpersonatedCredential>(google.UnderlyingCredential);
-        Assert.Equal(TimeSpan.FromSeconds(80), impersonated.HttpClient.Timeout);
+        Assert.Equal(TimeSpan.FromSeconds(90), impersonated.HttpClient.Timeout);
         var source = Assert.IsAssignableFrom<ServiceCredential>(((GoogleCredential)impersonated.SourceCredential).UnderlyingCredential);
-        Assert.Equal(TimeSpan.FromSeconds(80), source.HttpClient.Timeout);
+        Assert.Equal(TimeSpan.FromSeconds(90), source.HttpClient.Timeout);
     }
 
     [Fact]

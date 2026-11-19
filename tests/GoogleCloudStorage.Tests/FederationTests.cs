@@ -92,7 +92,7 @@ public sealed class FederationTests : IDisposable
     [Fact]
     public void ServiceAccountKey_without_key_material_names_the_missing_fields()
     {
-        var a = new Authentication { ProjectId = "proj", ClientEmail = "x@proj.iam.gserviceaccount.com" };
+        var a = new Authentication { ProjectId = "proj", AuthenticationMethod = "ServiceAccountKey", ClientEmail = "x@proj.iam.gserviceaccount.com" };
         var ex = Assert.Throws<ArgumentException>(() => _sut.Bucket_Exists(a, "b", out _));
         Assert.Contains("missing: PrivateKey", ex.Message);
     }

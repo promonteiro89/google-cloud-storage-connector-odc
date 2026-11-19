@@ -4,6 +4,112 @@ All notable changes to the **Google Cloud Storage Connector for ODC** are docume
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-11-19
+
+Parity with the O11 connector's 2.0.0: secure bucket defaults, create-only uploads with content headers, and a required `AuthenticationMethod`. **Breaking:** see **Migrating from 2.0.x**. It also contains all of 2.0.2 below, which was never released on its own.
+
+### Breaking changes
+
+- **`AuthenticationMethod` is required.** An empty or whitespace value is rejected before any request with "AuthenticationMethod is required. Set it to 'WorkloadIdentityFederation' or 'ServiceAccountKey'." It used to mean `ServiceAccountKey`. An invalid value now reads "Invalid AuthenticationMethod '…'. Use 'WorkloadIdentityFederation' or 'ServiceAccountKey'." The structure field is now mandatory.
+- **`Bucket_Create` is secure by default:** uniform bucket-level access on and public access prevention **enforced**. Before, Google's defaults applied.
+- **Signed URLs with Workload Identity Federation are limited to 720 minutes (12 hours).** Google signs them with a key it rotates, so a longer URL could stop working before it expires. A longer value is rejected before any request. Service account keys keep 10080 minutes.
+- **`Object_Upload` and `Object_UploadBinary` have a new `Generation` output**, so existing calls must be refreshed in ODC Studio.
+- **Header values must be printable ASCII everywhere, with the O11 connector's messages:** "… must not contain line breaks." or "… must contain only printable ASCII characters (no control characters, accented letters or other non-ASCII characters)." This covers `ContentType` in every action and the new upload headers. `Object_UpdateMetadata`'s `ContentDisposition`, `CacheControl` and `ContentEncoding` used to allow non-ASCII characters; they no longer do.
+
+### Added
+
+- **`Bucket_Create`:** optional `StorageClass` (`STANDARD`, `NEARLINE`, `COLDLINE`, `ARCHIVE`, case-insensitive; empty = `STANDARD`; anything else rejected before any request), `AllowFineGrainedAcl` and `AllowPublicAccess` (both `False` by default).
+- **`Object_Upload` and `Object_UploadBinary`:**
+  - optional `OnlyIfNotExists`: store only if no object with this name exists, using Google's `ifGenerationMatch=0`. If an attempt stored the object but its answer was lost, the repeat gets a 412. The connector then reads the object and succeeds only when its size, MD5 and creation time (no earlier than this call) show it is the one this call stored. Otherwise it fails with "Object '…' already exists in bucket '…'. OnlyIfNotExists is True, so the existing object was left unchanged.";
+  - optional `ContentDisposition`, `CacheControl` and `ContentEncoding`, stored with the object;
+  - the `Generation` output.
+- **`Object` (the entries of `Object_List`):** `Generation`, `MD5Hash` and `Crc32c`, filled from the listing without extra requests.
+
+### Changed
+
+- **`Object_Delete` deletes an object replaced during the call, as the O11 connector does.** If the object is replaced between the read and the delete, the connector reads the new generation and deletes that, up to 3 times. It used to report the replacement and delete nothing. If the object keeps being replaced, the action fails with "The object '…/…' was replaced by other requests on each of 3 attempts to delete it, so it was not deleted. Retry the delete." An object found gone after the read now counts as deleted (it used to be reported as not found after a 408 or 429). After a repeat whose earlier attempt may have been applied, a newer object is still left alone and reported.
+- **Messages use the O11 connector's wording** where both connectors behave the same: could not reach Google, a proxy or sign-in page answering instead of Google, an identity provider response over 1 MB, a malformed or oversized `SubjectToken`, a concurrent metadata change, a metadata update that may already have been applied, a move whose source changed (now with the generation read), a copy 404 whose look-up failed, `Object_DeleteByPrefix` progress ("Deleted N object(s)…, then listing the next page failed"), a request rejected by the client library, a signed URL without `ObjectName` ("ObjectName is required; a signed URL without an object name would grant access to the bucket itself.") and a missing `ProjectId` ("Bucket_List requires Authentication.ProjectId."). Apps that match on message text must be updated.
+
+### Migrating from 2.0.x
+
+1. Set `AuthenticationMethod` to `ServiceAccountKey` wherever it was left empty (for example in the setting that drives it).
+2. Refresh the library in ODC Studio, so calls to `Object_Upload`, `Object_UploadBinary` and `Bucket_Create` pick up the new inputs and the `Generation` output.
+3. If you rely on fine-grained ACLs or public objects in buckets created by the connector, pass `AllowFineGrainedAcl` or `AllowPublicAccess` as `True`.
+4. With Workload Identity Federation, keep signed URLs at 720 minutes or less.
+
+### Tests
+
+- 444 tests (413 in 2.0.2). `Version210Tests` mirrors the O11 connector's U1–U8, B1–B3, L1, A1–A3 and S1–S3, and runs each upload test on both upload actions. The "different bytes" case keeps the same length, so the MD5 check really is tested.
+- Each new check is proven by a deliberate break: 23 mutants (18 for the O11 2.0.0 items, 5 for `Object_Delete`), each caught by a test.
+
+## [2.0.2] - Not released separately (included in 2.1.0)
+
+Fixes from five independent reviews of 2.0.1 and from the reviews of the O11 connector's 1.7.4. No action, input or output changes: a drop-in replacement for 2.0.1. Some inputs that used to fail at Google, or with a raw error, are now rejected by the connector with a clear message (see **Changed**).
+
+### Fixed
+
+- **A repeated request could report success for something that did not happen.** 2.0.1 treated a 412 or 404 on a repeated delete as "the first request did it". That is wrong when the first attempt was refused with 408 or 429: Google did not apply it, so a 412 means someone else replaced the object, and `Object_Delete` and `Object_Move` returned success with the newer object still in place. The connector now trusts a repeat's answer only after an attempt whose outcome is unknown (a network error, or a 500, 502, 503 or 504), and after a 412 it looks at the object before answering: gone means success, a newer object is reported as a replacement. `Object_UpdateMetadata` says "may already have been applied" only in that same case.
+- **`Bucket_Delete` and `Bucket_Create` reported a failure for something that had worked.** Google's library repeated them by itself, so a request that Google applied but answered with a 503 came back as "bucket does not exist" or "name already taken". The connector now repeats them itself: a repeat that finds the bucket gone reports success, and a repeat that finds it already there reports success only when the bucket is readable and was created since the call began.
+- **Actions could run until ODC killed them at 95 seconds.** `Object_DownloadBinary` had no time limit once the response headers had arrived, so a stalled download hung. `Object_Copy` and `Object_Move` followed Google's multi-step copy of large objects with no limit. An action that makes two requests could wait 80 seconds on each. Every action other than the File transfers and `Object_DeleteByPrefix`, which already had their own limits, now runs under one 85-second deadline covering all of its requests and retries. Its error says what the action was doing and what state that leaves (for example "the object may or may not have been deleted: check with Object_Exists"). The timeout of a single request to Google moved from 80 to 90 seconds, above these deadlines and below ODC's 95, so it never cuts in first with its less specific message.
+- **A slow identity provider failed after 12 seconds with "A task was canceled".** The token request was tied to the 12 seconds Google's library allows its first attempt, not to the connector's 30 seconds. It now runs under the connector's own 30-second deadline, and a slower provider gets the "did not respond within 30 seconds" message.
+- **One connection error failed reads, listings and copies.** Google's library retries a 5xx answer but not a failed connection, and the connector retried only transfers and guarded writes. `Object_Exists`, `Object_GetMetadata`, `Object_List`, `Object_Copy`, `Bucket_List`, `Bucket_Exists`, URL signing and the first read of `Object_Delete`, `Object_Move`, `Object_UpdateMetadata` and `Object_Download` now repeat after a network error, up to 3 attempts. Listings fetch one page per request, so a failed page is repeated on its own.
+- **One connection error ended a whole `Object_DeleteByPrefix`.** A failed listing page or delete is now repeated, and a delete whose answer was lost that way is still counted.
+- **`Object_Download` could return new content with the old content type.** It read the object's size and type and then downloaded whatever was current. It now downloads the generation it read, and says so when the object was replaced or deleted meanwhile.
+- **Bucket names reached error messages uncleaned, and a name ending in a line break was signed into a URL.** Google's library checked the name with a pattern that accepts a trailing line break and put the raw name in its own error. The connector now checks bucket names itself.
+- **The message cleaner missed some characters.** The Unicode line and paragraph separators (U+2028, U+2029), invisible formatting characters above U+FFFF and unpaired surrogates are now replaced too, and the 500-character cut no longer splits a character. The name of a downloaded File is cleaned the same way.
+- **A `ClientSecret` could still appear in an error.** 2.0.1 masked the plain and two URL-encoded forms, but not the exact form the secret is sent in when it contains a space and one of `! * ( )`, nor the HTTP Basic form of the second attempt. Both are now masked.
+- **A proxy that echoes the request could put a token in an error.** Text shaped like a bearer token, a Basic credential, a Google access token or a JWT is now masked in every message, so a `SubjectToken` that Google's token exchange repeats in its refusal no longer appears either. A very long error page is cut before it is processed.
+- **A secret echoed in the `Content-Type` of a non-JSON identity provider answer was printed.** That header value is now masked like the rest of the provider's text.
+- **URL signing was not repeated after a 408 or 429.** With Workload Identity Federation, Google's library repeats the signing request after a 500, 502, 503 or 504 only. The connector now repeats it after a 408, a 429 or a network error, and nothing else, so attempts are never multiplied.
+- **A `SubjectToken` of any shape and size was cached.** Each distinct value took an entry in three caches for at least 5 minutes: 100 values of a million characters held 196 MB. A value that does not have the shape of a JWT, or is longer than 32,768 characters, is now rejected before anything is cached. A JWT-shaped token that Google's token exchange refuses is dropped from the caches at once, so made-up tokens cannot push other apps' identities out.
+- **`ServiceAccountEmail` was not checked** and became part of a Google URL: a value such as `a/../../v1/other/x` changed the path the request went to. It must now be an e-mail address or the account's numeric unique ID.
+- **The object names `.` and `..` sent a download to another address.** In a URL they are path steps, so `Object_DownloadBinary` asked Google for the bucket or its listing instead of an object. Google does not allow these names; the connector now rejects them, and bucket names that start or end with a dot or dash, before any request.
+- **Plain-text error bodies were dropped.** When Google or a proxy answered with a body that is not JSON, the message said "No error message was specified", and every such 404 cost an extra bucket look-up. The body is now read (cleaned and cut like any other text).
+- **A proxy's sign-in page was reported as "an input is invalid".** A successful answer that is not JSON now says a proxy, firewall or sign-in page answered instead of Google.
+- **A non-ASCII or control character in a content type was retried three times and reported as "Could not reach Google Cloud"**, and a NUL escaped as a raw error. The content type is now checked before anything is sent.
+- **A missing library file was retried and reported as a broken connection to Google.** File-system errors are no longer treated as network errors.
+- **Two messages said more than was known.** After the File upload deadline the message said "nothing was stored"; a request in flight may still complete, so it now says to check with `Object_Exists`. The request-timeout message advised signed URLs on every action; it now does so only for uploads and downloads.
+- **`Object_Move` printed the source's generation next to the destination's name** in one message; the number is gone.
+- **`Object_Move` said "both objects exist" when it could not know.** When the delete of the source failed in a way that may still have gone through (a timeout, a 5xx, a look-up that failed), the message now says both objects may exist and to check the source. A refusal such as access denied still says both exist.
+- **`Object_UpdateMetadata` accepted line breaks in the values it stores as headers.** `ContentType` must now be printable ASCII, as on upload, and `ContentEncoding`, `ContentDisposition` and `CacheControl` cannot contain control characters.
+- **`Object_DownloadBinary` allocated 10 MB per call** and read 10 MB of an oversized object before refusing it; it now reads 1 MB at a time.
+- **`dotnet test` in the repository root ran no tests**: the solution file held only the library. It now includes the test project.
+
+### Changed
+
+- **Tokens are limited to Cloud Storage.** The service account key sign-in and the impersonated token of Workload Identity Federation now request `devstorage.full_control` instead of `cloud-platform`, so a token in memory or in a dump cannot reach other Google Cloud APIs the service account has roles for. Signed URLs are unaffected: with federation, Google's library signs with the source credential re-scoped to IAM.
+- **Rejected before any request, with a clear message:** a bucket name with characters other than lowercase letters, digits, dashes, underscores and dots, one that starts or ends with a dot, dash or underscore, or one longer than 222 characters; the object names `.` and `..`; a content type that is not printable ASCII; control characters in the header values of `Object_UpdateMetadata`; a `SubjectToken` that is not JWT-shaped or is longer than 32,768 characters; a `ServiceAccountEmail` that is neither an e-mail address nor a numeric unique ID. Spaces and line breaks around `ClientId`, `Scope` and `Audience` are ignored.
+- **Repeats of `Bucket_Create` and `Bucket_Delete`** now follow the connector's rule (3 attempts in all) instead of Google's library's longer back-off.
+- **Request timeout:** 90 seconds per request to Google (80 before). Every action stops itself at 85 seconds (88 for `Object_DeleteByPrefix`), so the request timeout is only a backstop.
+- **Action descriptions** corrected for `Object_UpdateMetadata`, `Object_UploadBinary`, `Bucket_Exists` and the `Operation` and `ContentType` inputs; `PrivateKey` now also advises a Secret setting, as `ClientSecret` does.
+
+### Documentation
+
+- README: the 85-second deadline, what is retried, how a repeat is judged, the input checks, the 30-second identity provider limit, gzip downloads (not checksum-checked, 2 GB measured on the stored size), Google's 403 for a missing object when the role cannot list, CORS for browser uploads, what an upload URL cannot limit, and bucket defaults.
+- ODC Self-Hosted: the README no longer says the File type is missing there; it says the File actions have not been verified.
+- New `NOTICE` file listing the third-party libraries in the release package and their licences.
+- `Bucket_Exists` with Storage Object Admin: Storage Legacy Bucket Reader on the bucket is enough; the `Operation` input of `Object_GetSignedUrl` defaults to `Download` only when not set, and an empty text is rejected; service account key creation can be blocked by the `iam.disableServiceAccountKeyCreation` organization policy.
+
+### Not changed, on purpose
+
+- **A gzip object that decompresses to more than 2 GB** is not refused up front: the 85-second deadline stops such a download long before.
+- **A read or write error from ODC storage during a File transfer** is still reported as a connection error: telling the two apart means wrapping the stream, which would change the large-file path measured on ODC.
+- **`Object_UpdateMetadata` after a repeat that finds the object changed** still answers "may already have been applied" rather than comparing the object with the update.
+
+### Tests
+
+- 413 tests (201 in 2.0.1), in seven new files.
+- **New tests:**
+  - a repeated delete, move, metadata update, bucket delete and bucket create after each kind of failure;
+  - every action stopped by the deadline at each of its steps, a download whose body stalls, a copy that never finishes;
+  - a connection that fails once on every read, listing page, copy, signature and delete;
+  - the identity provider beyond Google's 12 seconds, the masked secret in the form it is sent, malformed and oversized subject tokens, service account e-mails, trimmed inputs;
+  - bucket names, content types, the message cleaner, File names, plain-text and non-JSON answers.
+- **Guarantees that no test proved before:** download checksums; each retried status, the 3-attempt limit and the retry window; the unguarded delete that is never repeated; the HTTP method each signed URL is signed for; the time budget and progress messages of `Object_DeleteByPrefix`; the 80-second request timeout; an unclear 404 on a copy; a 0-byte upload.
+- **Each fix is proven:** removing it makes a test fail.
+- **Reviewed twice before release:** two independent reviews of the finished change found one Medium issue each (the request timeout pre-empting the action deadline; made-up tokens holding cache slots) and eleven Low ones. Both Medium and nine Low findings are fixed above, each with a test. Three more fixes came from the O11 connector's 1.7.5 work: JWT-shaped text, the `Content-Type` echo and the signing retry.
+- The offline fake of Google no longer loops on a 0-byte upload.
+
 ## [2.0.1] - 2026-11-09
 
 Fixes from the four reviews of the O11 connector's 1.7.3, checked against this connector. No action, input or output changes: a drop-in replacement for 2.0.0.
@@ -297,6 +403,7 @@ New object-listing, folder-navigation, and signed-URL capabilities, plus more ac
 
 - **`Object_List` signature changed.** It gained required inputs (`MaxResults`, `PageToken`, `Delimiter`) and outputs (`NextPageToken`, `PrefixList`). Apps that consume `Object_List` in Service Studio must remap the action after upgrading. All other changes are backward-compatible — the new `ContentType` on `Object_GetSignedUrl` is optional.
 
+[2.1.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v2.1.0
 [2.0.1]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v2.0.1
 [2.0.0]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v2.0.0
 [1.7.2]: https://github.com/promonteiro89/google-cloud-storage-connector-odc/releases/tag/v1.7.2

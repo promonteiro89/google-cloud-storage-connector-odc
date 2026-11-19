@@ -30,7 +30,7 @@ public class IntegrationTests
     }
 
     private void Upload(string bucket, string name, byte[] content, string contentType, IEnumerable<MetadataEntry>? metadata = null) =>
-        _sut.Object_UploadBinary(TestSupport.Auth(), bucket, name, new GcsFile { Content = content, ContentType = contentType }, metadata ?? []);
+        _sut.Object_UploadBinary(TestSupport.Auth(), bucket, name, new GcsFile { Content = content, ContentType = contentType }, metadata ?? [], out _);
 
     private void Cleanup(string bucket)
     {
@@ -394,7 +394,7 @@ public class IntegrationTests
                 _sut.Object_DownloadBinary(TestSupport.Auth(), b, "does-not-exist.txt", out _));
 
             Assert.ThrowsAny<Exception>(() =>
-                _sut.Object_UploadBinary(TestSupport.Auth(), "no-such-bucket-" + Guid.NewGuid().ToString("N")[..8], "f.txt", new GcsFile { Content = [1], ContentType = "text/plain" }, []));
+                _sut.Object_UploadBinary(TestSupport.Auth(), "no-such-bucket-" + Guid.NewGuid().ToString("N")[..8], "f.txt", new GcsFile { Content = [1], ContentType = "text/plain" }, [], out _));
 
             Assert.ThrowsAny<Exception>(() =>
                 _sut.Bucket_Delete(TestSupport.Auth(), b)); // non-empty
@@ -525,7 +525,7 @@ public class IntegrationTests
         try
         {
             _sut.Object_UploadBinary(TestSupport.Auth(), b, "null-content.bin",
-                new GcsFile { Content = null!, ContentType = "application/octet-stream" }, []);
+                new GcsFile { Content = null!, ContentType = "application/octet-stream" }, [], out _);
 
             _sut.Object_GetMetadata(TestSupport.Auth(), b, "null-content.bin", out var exists, out var md, out _);
             Assert.True(exists);
@@ -535,7 +535,7 @@ public class IntegrationTests
             Assert.Empty(empty.Content);
 
             _sut.Object_UploadBinary(TestSupport.Auth(), b, "no-type.txt",
-                new GcsFile { Content = Encoding.UTF8.GetBytes("x"), ContentType = "" }, []);
+                new GcsFile { Content = Encoding.UTF8.GetBytes("x"), ContentType = "" }, [], out _);
 
             _sut.Object_DownloadBinary(TestSupport.Auth(), b, "no-type.txt", out var file);
             Assert.Equal("x", Encoding.UTF8.GetString(file.Content));
@@ -566,9 +566,9 @@ public class IntegrationTests
         try
         {
             _sut.Object_UploadBinary(TestSupport.Auth(), b, "plain-1.txt",
-                new GcsFile { Content = Encoding.UTF8.GetBytes("1"), ContentType = "" }, []);
+                new GcsFile { Content = Encoding.UTF8.GetBytes("1"), ContentType = "" }, [], out _);
             _sut.Object_UploadBinary(TestSupport.Auth(), b, "plain-2.txt",
-                new GcsFile { Content = Encoding.UTF8.GetBytes("2"), ContentType = "" }, []);
+                new GcsFile { Content = Encoding.UTF8.GetBytes("2"), ContentType = "" }, [], out _);
 
             _sut.Object_List(TestSupport.Auth(), b, "plain-", 0, "", "", out var objects, out _, out _);
             var list = objects.ToList();
@@ -598,7 +598,7 @@ public class IntegrationTests
             {
                 var ex = Assert.ThrowsAny<Exception>(() =>
                     _sut.Object_DeleteByPrefix(TestSupport.Auth(), b, "budget/", out _));
-                Assert.Contains("Deleted 0 objects", ex.Message);
+                Assert.Contains("Deleted 0 object(s)", ex.Message);
                 Assert.Contains("call Object_DeleteByPrefix again", ex.Message);
             }
             finally

@@ -576,7 +576,7 @@ public sealed class CacheIsolationTests : IDisposable
             Connector.EmulatorBaseUri = null;
             var auth = TestSupport.Auth();
             var client = (StorageClient)StorageClientFor(auth)!;
-            Assert.Equal(TimeSpan.FromSeconds(80), client.Service.HttpClient.Timeout);
+            Assert.Equal(TimeSpan.FromSeconds(90), client.Service.HttpClient.Timeout);
         }
         finally
         {

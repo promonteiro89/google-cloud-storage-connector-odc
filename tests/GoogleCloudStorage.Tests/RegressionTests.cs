@@ -97,7 +97,7 @@ public class RegressionTests
     public void O7_required_names_are_rejected_by_object_and_bucket_actions()
     {
         var upload = Assert.Throws<ArgumentException>(() =>
-            _sut.Object_UploadBinary(TestSupport.Auth(), "", "o.txt", new GcsFile { Content = [1], ContentType = "text/plain" }, []));
+            _sut.Object_UploadBinary(TestSupport.Auth(), "", "o.txt", new GcsFile { Content = [1], ContentType = "text/plain" }, [], out _));
         Assert.Contains("BucketName", upload.Message);
 
         var download = Assert.Throws<ArgumentException>(() =>
@@ -163,7 +163,7 @@ public class RegressionTests
 
         var timeout = Connector.TranslateException(new TaskCanceledException("slow"), TestSupport.Auth(), "b", "o");
         Assert.Contains("timed out", timeout.Message);
-        Assert.Contains("80 seconds", timeout.Message);
+        Assert.Contains("90 seconds", timeout.Message);
     }
 
     // ---- O12: the download cap on every write path --------------------------------------

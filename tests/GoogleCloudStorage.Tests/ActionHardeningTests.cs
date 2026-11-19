@@ -143,7 +143,7 @@ public sealed class ActionHardeningTests : IDisposable
 
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_DeleteByPrefix(ClientCredentials(), Bucket, "pfx/", out _));
 
-        Assert.Contains("Deleted 0 objects", ex.Message);
+        Assert.Contains("Deleted 0 object(s)", ex.Message);
         Assert.DoesNotContain(_backend.Requests, IsRecordedDelete);
     }
 
@@ -239,14 +239,42 @@ public sealed class ActionHardeningTests : IDisposable
     }
 
     [Fact]
-    public void D3_Delete_of_a_replaced_object_reports_it_and_deletes_nothing()
+    public void D3b_Delete_answered_412_whose_object_is_then_gone_counts_as_deleted()
     {
         Seed("doc.txt", 7);
-        _backend.StorageResponseOverride = req => IsDelete(req) ? JsonError(HttpStatusCode.PreconditionFailed, "Precondition Failed") : null;
+        int deletes = 0;
+        _backend.StorageResponseOverride = req =>
+        {
+            if (!IsDelete(req) || ++deletes > 1) return null;
+            // Someone else deletes the object between our read and our delete.
+            lock (_backend.Objects) _backend.Objects.Remove($"{Bucket}/doc.txt");
+            return JsonError(HttpStatusCode.PreconditionFailed, "Precondition Failed");
+        };
 
-        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt"));
+        _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt");
 
-        Assert.Contains("was replaced while it was being deleted", ex.Message);
+        Assert.Equal(1, _backend.Requests.Count(IsRecordedDelete));
+        Assert.Empty(_backend.Objects);
+    }
+
+    [Fact]
+    public void D3_Delete_of_an_object_replaced_after_the_read_deletes_the_new_generation()
+    {
+        Seed("doc.txt", 7);
+        int deletes = 0;
+        _backend.StorageResponseOverride = req =>
+        {
+            if (!IsDelete(req) || ++deletes > 1) return null;
+            // A writer replaces the object between the read and the delete.
+            lock (_backend.Objects) _backend.Objects[$"{Bucket}/doc.txt"] = new FakeFederationBackend.FakeObject(8, 1);
+            return JsonError(HttpStatusCode.PreconditionFailed, "Precondition Failed");
+        };
+
+        _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt");
+
+        var second = _backend.Requests.Where(IsRecordedDelete).Last();
+        Assert.Equal("8", HttpUtility.ParseQueryString(second.Uri.Query)["ifGenerationMatch"]);
+        Assert.Empty(_backend.Objects);
     }
 
     [Fact]
@@ -325,7 +353,7 @@ public sealed class ActionHardeningTests : IDisposable
         _backend.StorageResponseOverride = FailFirst(IsSessionPost, HttpStatusCode.ServiceUnavailable);
         var bytes = new byte[] { 1, 2, 3, 4, 5, 6 };
 
-        _sut.Object_UploadBinary(ClientCredentials(), Bucket, "up.bin", new GcsFile { Content = bytes, ContentType = "application/octet-stream" }, []);
+        _sut.Object_UploadBinary(ClientCredentials(), Bucket, "up.bin", new GcsFile { Content = bytes, ContentType = "application/octet-stream" }, [], out _);
 
         Assert.Equal(bytes, _backend.StoredObjects[$"{Bucket}/up.bin"]);
         Assert.Equal(2, _backend.Requests.Count(IsRecordedSessionPost));
@@ -335,9 +363,9 @@ public sealed class ActionHardeningTests : IDisposable
     public void UP2_Upload_rejects_a_content_type_with_line_breaks_before_any_request()
     {
         var ex = Assert.Throws<ArgumentException>(() =>
-            _sut.Object_UploadBinary(ClientCredentials(), Bucket, "up.txt", new GcsFile { Content = [1], ContentType = "text/plain\r\nX-Evil: 1" }, []));
+            _sut.Object_UploadBinary(ClientCredentials(), Bucket, "up.txt", new GcsFile { Content = [1], ContentType = "text/plain\r\nX-Evil: 1" }, [], out _));
 
-        Assert.Contains("ContentType cannot contain line breaks", ex.Message);
+        Assert.Equal("ContentType must not contain line breaks.", ex.Message);
         Assert.Empty(_backend.Requests);
     }
 
@@ -365,8 +393,8 @@ public sealed class ActionHardeningTests : IDisposable
         var list = Assert.Throws<ArgumentException>(() => _sut.Bucket_List(auth, out _));
         var create = Assert.Throws<ArgumentException>(() => _sut.Bucket_Create(auth, "new-bucket", "US"));
 
-        Assert.Contains("ProjectId cannot be empty", list.Message);
-        Assert.Contains("ProjectId cannot be empty", create.Message);
+        Assert.Equal("Bucket_List requires Authentication.ProjectId.", list.Message);
+        Assert.Equal("Bucket_Create requires Authentication.ProjectId.", create.Message);
         Assert.Empty(_backend.Requests);
     }
 
@@ -437,7 +465,7 @@ public sealed class ActionHardeningTests : IDisposable
     public void DL5_Download_timeout_is_translated_not_an_AggregateException_and_not_retried()
     {
         SeedContent("big.bin", new byte[10]);
-        _backend.StorageResponseOverride = req => IsMediaGet(req) ? throw new TaskCanceledException("simulated 80-second timeout") : null;
+        _backend.StorageResponseOverride = req => IsMediaGet(req) ? throw new TaskCanceledException("simulated request timeout") : null;
 
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_DownloadBinary(ClientCredentials(), Bucket, "big.bin", out _));
 
@@ -476,7 +504,7 @@ public sealed class ActionHardeningTests : IDisposable
     // ---- 2.0.0: findings from the O11 connector's 1.7.4 reviews ---------------------------
 
     [Fact]
-    public void R4_A_repeated_delete_answered_412_counts_as_deleted_and_leaves_the_new_object()
+    public void R4_A_repeated_delete_answered_412_reports_the_new_object_and_leaves_it()
     {
         Seed("doc.txt", 7);
         int deletes = 0;
@@ -488,11 +516,15 @@ public sealed class ActionHardeningTests : IDisposable
             return JsonError(HttpStatusCode.ServiceUnavailable, "Backend Error");
         };
 
-        _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt");
+        // 2.0.2: a 412 on the repeat no longer counts as deleted by itself; the connector looks, finds
+        // the newer object and says so (2.0.1 returned normally here).
+        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Delete(ClientCredentials(), Bucket, "doc.txt"));
 
+        Assert.Contains("was replaced while it was being deleted: a newer version now exists and was not deleted", ex.Message);
         Assert.Equal(2, _backend.Requests.Count(IsRecordedDelete));
         Assert.Equal(8, _backend.Objects[$"{Bucket}/doc.txt"].Generation);
-        Assert.Single(_backend.Requests, r => r.Method == HttpMethod.Get && r.Uri.AbsolutePath.EndsWith("/o/doc.txt", StringComparison.Ordinal));
+        // The read before the delete, and the look after the 412.
+        Assert.Equal(2, _backend.Requests.Count(r => r.Method == HttpMethod.Get && r.Uri.AbsolutePath.EndsWith("/o/doc.txt", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -540,7 +572,7 @@ public sealed class ActionHardeningTests : IDisposable
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_UpdateMetadata(ClientCredentials(), Bucket, "doc.txt", "text/csv", "", "", "", Array.Empty<MetadataEntry>()));
 
         Assert.Contains("may already have been applied", ex.Message);
-        Assert.Contains("Object_GetMetadata", ex.Message);
+        Assert.Contains("Read the object's metadata before retrying", ex.Message);
         Assert.DoesNotContain("nothing was changed", ex.Message);
     }
 
@@ -556,7 +588,7 @@ public sealed class ActionHardeningTests : IDisposable
     }
 
     [Fact]
-    public void R9_A_move_whose_repeated_source_delete_answers_412_succeeds()
+    public void R9_A_move_whose_repeated_source_delete_answers_412_reports_the_newer_source()
     {
         Seed("src.txt", 7);
         int deletes = 0;
@@ -567,8 +599,10 @@ public sealed class ActionHardeningTests : IDisposable
             return JsonError(HttpStatusCode.ServiceUnavailable, "Backend Error");
         };
 
-        _sut.Object_Move(ClientCredentials(), Bucket, "src.txt", Bucket, "dst.txt");
+        // 2.0.2: the connector looks before trusting the 412; the source exists again with newer data.
+        var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_Move(ClientCredentials(), Bucket, "src.txt", Bucket, "dst.txt"));
 
+        Assert.Contains("was modified during the move and was not deleted", ex.Message);
         Assert.Equal(2, _backend.Requests.Count(IsRecordedDelete));
         Assert.Equal(9, _backend.Objects[$"{Bucket}/src.txt"].Generation);
     }

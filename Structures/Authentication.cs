@@ -2,7 +2,7 @@ using OutSystems.ExternalLibraries.SDK;
 
 namespace OutSystems.ExternalLibraries.GoogleCloudStorage_Connector.Structures;
 
-[OSStructure(Description = "Google Cloud credentials. Two methods are supported: 'WorkloadIdentityFederation' (recommended, keyless) and 'ServiceAccountKey' (legacy: ClientEmail + PrivateKey). Leave AuthenticationMethod empty to use ServiceAccountKey.")]
+[OSStructure(Description = "Google Cloud credentials. Two methods are supported: 'WorkloadIdentityFederation' (recommended, keyless) and 'ServiceAccountKey' (legacy: ClientEmail + PrivateKey). AuthenticationMethod is required.")]
 public struct Authentication
 {
     public Authentication()
@@ -24,7 +24,7 @@ public struct Authentication
     [OSStructureField(Description = "The unique ID of your Google Cloud Project.", IsMandatory = true)]
     public string ProjectId { get; set; }
 
-    [OSStructureField(Description = "'WorkloadIdentityFederation' (recommended, keyless) or 'ServiceAccountKey' (legacy). Empty = ServiceAccountKey.")]
+    [OSStructureField(Description = "Required: 'WorkloadIdentityFederation' (recommended, keyless) or 'ServiceAccountKey' (legacy).", IsMandatory = true)]
     public string AuthenticationMethod { get; set; }
 
     // ---- ServiceAccountKey (legacy) ----------------------------------------------------
@@ -32,7 +32,7 @@ public struct Authentication
     [OSStructureField(Description = "ServiceAccountKey only: the 'client_email' from your Service Account JSON key.")]
     public string ClientEmail { get; set; }
 
-    [OSStructureField(Description = "ServiceAccountKey only: the 'private_key' from your Service Account JSON key.")]
+    [OSStructureField(Description = "ServiceAccountKey only: the 'private_key' from your Service Account JSON key. Store it as a Secret setting.")]
     public string PrivateKey { get; set; }
 
     // ---- WorkloadIdentityFederation (recommended) ---------------------------------------

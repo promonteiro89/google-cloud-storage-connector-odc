@@ -60,7 +60,7 @@ public sealed class UploadIntegrityTests : IDisposable
     {
         var data = SampleBytes(300_000);
         _sut.Object_UploadBinary(Federated(), "my-bucket", "docs/report.bin",
-            new BinaryContent { Content = data, ContentType = "application/octet-stream" }, Array.Empty<MetadataEntry>());
+            new BinaryContent { Content = data, ContentType = "application/octet-stream" }, Array.Empty<MetadataEntry>(), out _);
 
         var finalPut = _backend.To("/upload/storage/v1/b/my-bucket/o").Last(r => r.Method == HttpMethod.Put);
         Assert.True(finalPut.Headers.TryGetValue("x-goog-hash", out var hash), "The upload did not send an x-goog-hash header.");
@@ -74,7 +74,7 @@ public sealed class UploadIntegrityTests : IDisposable
         _backend.CorruptUploadInTransit = true;
 
         var ex = Assert.ThrowsAny<Exception>(() => _sut.Object_UploadBinary(Federated(), "my-bucket", "docs/report.bin",
-            new BinaryContent { Content = SampleBytes(50_000), ContentType = "application/octet-stream" }, Array.Empty<MetadataEntry>()));
+            new BinaryContent { Content = SampleBytes(50_000), ContentType = "application/octet-stream" }, Array.Empty<MetadataEntry>(), out _));
 
         Assert.Contains("CRC32C", ex.Message);
         Assert.Contains("nothing was stored", ex.Message);
